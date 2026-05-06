@@ -36,7 +36,60 @@ def definir_argumentos():
     # Hacemos obligatoria la carpeta de salida (se quita el default para forzar su uso)
     parser.add_argument("-d", "--outdir", type=str, required=True, 
                         help="Carpeta de salida (Obligatorio)")
+    parser.add_argument("-e", "--estructural", action="store_true", 
+                        help="Activa el análisis de Superfamilias (Umbral 0.5)")
+    parser.add_argument("-f", "--funcional", action="store_true", 
+                        help="Activa el análisis Funcional (Umbral 0.2)")
     return parser.parse_args()
+
+def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
+    """
+    Realiza el clustering, genera el dendrograma y crea los scripts de PyMOL 
+    para un umbral específico (0.5, 0.2 o dinámico).
+    """
+    # 1. Clustering por distancia
+    labels = fcluster(agrup, umbral, criterion='distance')
+    k_encontrado = len(np.unique(labels))
+    
+    # 2. Guardar Resultados CSV
+    df_res = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels})
+    csv_path = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_resultados.csv")
+    df_res.to_csv(csv_path, index=False)
+
+    # 3. Dendrograma
+    plt.figure(figsize=(12, max(10, len(etiquetas) * 0.3)))
+    dendrogram(agrup, labels=etiquetas, orientation='right', color_threshold=umbral, above_threshold_color='grey')
+    plt.axvline(x=umbral, color='r', linestyle='--', label=f'Umbral {nombre_modo} ({umbral:.2f})')
+    plt.title(f"Dendrograma {nombre_modo.capitalize()} (K={k_encontrado})")
+    plt.legend()
+    plt.savefig(os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrograma.pdf"), format='pdf', bbox_inches='tight')
+    plt.close()
+
+    # 4. Scripts de PyMOL (en subcarpetas)
+    subir_dir = os.path.join(args.outdir, "scripts_pymol", nombre_modo)
+    os.makedirs(subir_dir, exist_ok=True)
+    
+    rutas_dict = {os.path.basename(f).split('.')[0]: os.path.abspath(f) for f in protein_files}
+
+    for cluster_id in np.unique(labels):
+        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
+        if len(prot_cluster) < 2: continue 
+        
+        medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
+        df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
+        ruta_pml = os.path.join(subir_dir, f"cluster_{cluster_id}.pml")
+        
+        with open(ruta_pml, "w") as f:
+            f.write(f"# Script PyMOL - {nombre_modo.capitalize()} - Cluster {cluster_id}\nreinitialize\n\n")
+            f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
+            f.write(f"color magenta, {medoide}\n")
+            for prot in prot_cluster:
+                if prot == medoide: continue
+                f.write(f"load {rutas_dict[prot]}, {prot}\n")
+                f.write(f"align {prot}, {medoide}\n")
+            f.write("\nshow cartoon\nutil.cbc\norient\n")
+    
+    print(f"[+] Vista '{nombre_modo}' completada. K={k_encontrado}")
 
 def optimizar_clustering(agrup, m_dist, n):
     """Prueba diferentes números de clusters y devuelve el mejor umbral penalizando solitarios."""
@@ -170,7 +223,7 @@ def generar_clustermap(m_sim_s, agrup, etiquetas, args):
     
     plt.close() # Reemplaza a plt.show()
 def encontrar_medoide(cluster_proteinas, m_dist, etiquetas):
-    """Encuentra la proteína que es el centro (medoide) del cluster."""
+    """Encuentra la proteína que es el centro (medoide) del cluster y lo notifica."""
     if len(cluster_proteinas) == 1:
         return cluster_proteinas[0]
     
@@ -180,8 +233,13 @@ def encontrar_medoide(cluster_proteinas, m_dist, etiquetas):
     submatriz = m_dist[np.ix_(indices, indices)]
     # La proteína con la menor suma de distancias a las demás es el medoide
     indice_medoide_local = np.argmin(submatriz.sum(axis=1))
+
+    medoide_elegido = cluster_proteinas[indice_medoide_local]
     
-    return cluster_proteinas[indice_medoide_local]
+    # --- NOTIFICACIÓN PARA EL USUARIO ---
+    print(f"   > Medoide del cluster ({len(cluster_proteinas)} prot): {medoide_elegido}")
+    
+    return medoide_elegido
 
 def generar_scripts_pymol(df_resultados, protein_files, m_dist, etiquetas, args):
     """Genera archivos .pml para visualizar cada cluster en PyMOL."""
@@ -265,28 +323,25 @@ def main():
     df_reporte.to_csv(os.path.join(args.outdir, f"{args.output}_resultados.csv"), index=False)
 
     # --- 2. GENERACIÓN DE GRÁFICOS ---
+
+    # 1. ANÁLISIS BASE (Siempre se ejecuta)
+    print("\n[Base] Ejecutando Optimización Estadística (Silhouette)...")
+    umbral_sil, k_optimo, score_optimo = optimizar_clustering(agrup, m_dist, n)
+    ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral_sil, "silhouette", args, protein_files)
+
+    # 2. ANÁLISIS ESTRUCTURAL (Solo si se usa -e)
+    if args.estructural:
+        print("\n[Opcional] Ejecutando Vista Estructural ($TM \geq 0.5$)...")
+        ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.5, "estructural", args, protein_files)
+
+    # 3. ANÁLISIS FUNCIONAL (Solo si se usa -f)
+    if args.funcional:
+        print("\n[Opcional] Ejecutando Vista Funcional ($TM \geq 0.8$)...")
+        ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.2, "funcional", args, protein_files)
+
     generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
-
-    plt.figure(figsize=(12, max(10, n * 0.3)))
-    dendrogram(agrup, labels=etiquetas, orientation='right', color_threshold=umbral, above_threshold_color='grey')
-    plt.axvline(x=umbral, color='r', linestyle='--', label=f'Umbral Silhouette ({umbral:.3f})')
-    plt.title(f"Dendrograma Estructural (K={k_optimo}, Silueta={score_optimo:.2f})")
-    plt.legend()
-    plt.savefig(os.path.join(args.outdir, f"{args.output}_dendrograma.pdf"), format='pdf', bbox_inches='tight')
-    plt.close()
-
     guardar_newick(agrup, etiquetas, args)
     generar_clustermap(m_sim_s, agrup, etiquetas, args)
-
-    # --- 3. NUEVA SECCIÓN: GENERAR SCRIPTS DE PYMOL ---
-    print("\n[+] Generando sesiones de PyMOL basadas en medoides...")
-    generar_scripts_pymol(
-        df_resultados=df_reporte, 
-        protein_files=protein_files, 
-        m_dist=m_dist, 
-        etiquetas=etiquetas, 
-        args=args
-    )
     
     print(f"\n[!] Finalizado. Los resultados y scripts están en: {args.outdir}")
 
