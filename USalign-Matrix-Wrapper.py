@@ -6,11 +6,11 @@ import seaborn as sns
 from tqdm import tqdm
 import scipy
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster, to_tree
-from sklearn.metrics import silhouette_score
 import os
 import time
 import argparse
 import pandas as pd
+import gc
 
 def obtener_tm_score(pdb1, pdb2):
     inicio = time.perf_counter()
@@ -27,56 +27,120 @@ def obtener_tm_score(pdb1, pdb2):
     return score1, score2, tiempo
 
 def definir_argumentos():
-    parser = argparse.ArgumentParser(description="Análisis de Similitud Estructural de Proteínas")
+    parser = argparse.ArgumentParser(description="ProTwins: Análisis de Similitud Estructural y Funcional de Proteínas")
     parser.add_argument("-r", "--ruta", nargs='+', required=True,
                         help="Ruta(s) a las carpetas que contienen archivos .pdb o .cif")
-    # Hacemos obligatorio el prefijo de salida
     parser.add_argument("-o", "--output", type=str, required=True, 
                         help="Prefijo para los archivos generados (Obligatorio)")
-    # Hacemos obligatoria la carpeta de salida (se quita el default para forzar su uso)
     parser.add_argument("-d", "--outdir", type=str, required=True, 
                         help="Carpeta de salida (Obligatorio)")
-    parser.add_argument("-e", "--estructural", action="store_true", 
-                        help="Activa el análisis de Superfamilias (Umbral 0.5)")
-    parser.add_argument("-f", "--funcional", action="store_true", 
-                        help="Activa el análisis Funcional (Umbral 0.2)")
     return parser.parse_args()
 
 def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
     """
-    Realiza el clustering, genera el dendrograma y crea los scripts de PyMOL 
-    para un umbral específico (0.5, 0.2 o dinámico).
+    Dendrograma con layout dinámico:
+    Los IDs de cluster (C1, C2...) se mueven automáticamente a la izquierda
+    dependiendo del largo de los nombres de las proteínas.
     """
-    # 1. Clustering por distancia
+    import gc
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.cluster.hierarchy import fcluster, dendrogram
+
+    # 1. Clustering
     labels = fcluster(agrup, umbral, criterion='distance')
     k_encontrado = len(np.unique(labels))
     
-    # 2. Guardar Resultados CSV
+    # 2. Medoides y Etiquetas con Asteriscos
     df_res = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels})
-    csv_path = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_resultados.csv")
-    df_res.to_csv(csv_path, index=False)
+    df_res['Es_Medoide'] = False
+    mapeo_nombres_grafico = {prot: prot for prot in etiquetas}
+    medoides_por_cluster = {}
 
-    # 3. Dendrograma
-    plt.figure(figsize=(12, max(10, len(etiquetas) * 0.3)))
-    dendrogram(agrup, labels=etiquetas, orientation='right', color_threshold=umbral, above_threshold_color='grey')
+    for cluster_id in np.unique(labels):
+        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
+        medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
+        df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
+        mapeo_nombres_grafico[medoide] = f"*** {medoide}"
+        medoides_por_cluster[cluster_id] = medoide
+
+    # 3. Guardar CSV
+    df_res.to_csv(os.path.join(args.outdir, f"{args.output}_{nombre_modo}_resultados.csv"), index=False)
+
+    # 4. Dendrograma Dinámico
+    # Calculamos el nombre más largo para ajustar el margen
+    nombres_finales = [mapeo_nombres_grafico[e] for e in etiquetas]
+    max_char = max(len(n) for n in nombres_finales)
+    
+    # Ajustamos el tamaño de la figura (más ancho si hay nombres largos)
+    ancho_base = 12 + (max_char * 0.1)
+    plt.figure(figsize=(ancho_base, max(10, len(etiquetas) * 0.3)))
+    
+    ddata = dendrogram(
+        agrup, 
+        labels=nombres_finales, 
+        orientation='right', 
+        color_threshold=umbral, 
+        above_threshold_color='grey'
+    )
+    
     plt.axvline(x=umbral, color='r', linestyle='--', label=f'Umbral {nombre_modo} ({umbral:.2f})')
-    plt.title(f"Dendrograma {nombre_modo.capitalize()} (K={k_encontrado})")
-    plt.legend()
+    plt.plot([], [], ' ', label="*** = Medoide del cluster") 
+    plt.legend(loc='upper left')
+
+    # --- LÓGICA DE POSICIONAMIENTO DINÁMICO ---
+    ax = plt.gca()
+    transform = ax.get_yaxis_transform() 
+    y_coords = {leaf: 5 + i * 10 for i, leaf in enumerate(ddata['ivl'])}
+    
+    # Factor de desplazamiento: 
+    # Los nombres están a la izquierda de X=0. 
+    # Desplazamos los corchetes proporcionalmente al largo del nombre máximo.
+    offset_nombres = - (max_char * 0.009) - 0.02 # Ajuste fino basado en caracteres
+    x_bracket = offset_nombres 
+    x_text = x_bracket - 0.04 # El ID del cluster un poco más a la izquierda
+
+    for cluster_id in np.unique(labels):
+        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
+        y_vals = [y_coords[mapeo_nombres_grafico[p]] for p in prot_cluster if mapeo_nombres_grafico[p] in y_coords]
+        
+        if not y_vals: continue
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_mid = (y_min + y_max) / 2
+        
+        # Dibujar corchete "["
+        if len(y_vals) > 1:
+            ax.plot([x_bracket, x_bracket - 0.01, x_bracket - 0.01, x_bracket], 
+                    [y_min, y_min, y_max, y_max], 
+                    color='black', transform=transform, clip_on=False, lw=1.5)
+            
+            # Texto del cluster (C#)
+            ax.text(x_text, y_mid, f"C{cluster_id}", va='center', ha='right', 
+                    transform=transform, clip_on=False, fontsize=10, fontweight='bold')
+        else:
+            # Para solitarios, solo el nombre del cluster
+            ax.text(x_bracket - 0.01, y_mid, f"C{cluster_id}", va='center', ha='right', 
+                    transform=transform, clip_on=False, fontsize=10, fontweight='bold')
+
+    # Aumentamos el margen izquierdo dinámicamente para que quepa todo
+    margin_left = min(0.4, 0.15 + (max_char * 0.01))
+    plt.subplots_adjust(left=margin_left) 
+    
     plt.savefig(os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrograma.pdf"), format='pdf', bbox_inches='tight')
     plt.close()
+    gc.collect()
 
-    # 4. Scripts de PyMOL (en subcarpetas)
+    # 5. Generar Scripts de PyMOL (Lógica intacta)
     subir_dir = os.path.join(args.outdir, "scripts_pymol", nombre_modo)
     os.makedirs(subir_dir, exist_ok=True)
-    
     rutas_dict = {os.path.basename(f).split('.')[0]: os.path.abspath(f) for f in protein_files}
 
     for cluster_id in np.unique(labels):
         prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
         if len(prot_cluster) < 2: continue 
         
-        medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
-        df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
+        medoide = medoides_por_cluster[cluster_id]
         ruta_pml = os.path.join(subir_dir, f"cluster_{cluster_id}.pml")
         
         with open(ruta_pml, "w") as f:
@@ -90,49 +154,10 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
             f.write("\nshow cartoon\nutil.cbc\norient\n")
     
     print(f"[+] Vista '{nombre_modo}' completada. K={k_encontrado}")
+    gc.collect()
 
-def optimizar_clustering(agrup, m_dist, n):
-    """Prueba diferentes números de clusters y devuelve el mejor umbral penalizando solitarios."""
-    mejor_score_ajustado = -1e9
-    mejor_k = 2
-    
-    # Probamos un rango amplio (hasta 30 clusters)
-    rango_k = range(2, min(n, 31)) 
-    
-    for k in rango_k:
-        labels = fcluster(agrup, k, criterion='maxclust')
-        base_score = silhouette_score(m_dist, labels, metric='precomputed')
-        
-        # --- LÓGICA DE PENALIZACIÓN ---
-        # Contamos cuántas proteínas hay en cada cluster
-        counts = np.bincount(labels)
-        # Identificamos cuántos clusters tienen solo 1 proteína (outliers)
-        num_solitarios = np.sum(counts == 1)
-        
-        # Penalizamos el score: a más clusters solitarios, menor es el puntaje.
-        # Esto obliga al algoritmo a preferir un K donde las proteínas estén agrupadas.
-        score_ajustado = base_score - (num_solitarios / k) * 0.3
-        
-        if score_ajustado > mejor_score_ajustado:
-            mejor_score_ajustado = score_ajustado
-            mejor_k = k
-            
-    # --- CÁLCULO DEL UMBRAL (Punto medio para asegurar colorización) ---
-    alturas = agrup[:, 2]
-    # Usamos el punto medio entre el salto del mejor_k y el anterior
-    dist_k = alturas[-mejor_k + 1]
-    dist_prev = alturas[-mejor_k] if mejor_k < n else dist_k
-    umbral_dinamico = (dist_k + dist_prev) / 2
-    
-    # Calculamos el score real final para el reporte
-    final_labels = fcluster(agrup, mejor_k, criterion='maxclust')
-    score_final = silhouette_score(m_dist, final_labels, metric='precomputed')
-    
-    return umbral_dinamico, mejor_k, score_final
-
-# --- NUEVAS FUNCIONES PARA NEWICK ---
+# --- FUNCIONES PARA NEWICK ---
 def construir_newick(nodo, newick, parentdist, nombres_hojas):
-    """Función recursiva para traducir nodos de SciPy a texto Newick."""
     if nodo.is_leaf():
         return f"{nombres_hojas[nodo.id]}:{(parentdist - nodo.dist):.6f}{newick}"
     else:
@@ -142,14 +167,12 @@ def construir_newick(nodo, newick, parentdist, nombres_hojas):
         return newick
 
 def guardar_newick(agrup, etiquetas, args):
-    """Genera y guarda el archivo .nwk"""
     arbol = to_tree(agrup, rd=False)
     cadena_newick = construir_newick(arbol, "", arbol.dist, etiquetas) + ";"
     ruta_newick = os.path.join(args.outdir, f"{args.output}_arbol.nwk")
     with open(ruta_newick, "w") as f:
         f.write(cadena_newick)
     print(f"Formato Newick guardado en: {ruta_newick}")
-# ------------------------------------
 
 def guardar_matrices_csv(m_sim, m_dist, etiquetas, args):
     ruta_sim = os.path.join(args.outdir, f"{args.output}_similitud.csv")
@@ -181,78 +204,70 @@ def generar_heat_maps(m_sim, m_dist_sim, etiquetas, args):
             vmin=v_min, 
             vmax=v_max,
             annot=False, 
-            fmt=".3f"
+            fmt=".3f",
+            rasterized=True # Evita problemas de RAM en PDFs enormes
         )    
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
         plt.tight_layout()
         
-        # Guardado en PDF y cierre de figura
         nombre_final = os.path.join(args.outdir, f"{args.output}_{nombre_base}.pdf")
         plt.savefig(nombre_final, format='pdf', bbox_inches='tight')
         print(f"Heatmap guardado en: {nombre_final}")
         
-        plt.close() # Reemplaza a plt.show()
+        plt.close() 
+        gc.collect()
 
-def generar_clustermap(m_sim_s, agrup, etiquetas, args):
-    n_prot = len(etiquetas)
-    lado_figura = max(10, n_prot * 0.5) 
+def generar_clustermap(m_sim, agrup, etiquetas, args):
+    """
+    Genera un mapa de calor jerárquico (Clustermap) de las similitudes.
+    """
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(12, 12))
     
     g = sns.clustermap(
-        m_sim_s,
+        m_sim,
         row_linkage=agrup,
         col_linkage=agrup,
         xticklabels=etiquetas,
         yticklabels=etiquetas,
-        cmap="coolwarm", 
-        vmin=0, 
-        vmax=1,
-        annot=False, 
-        fmt=".3f",
-        figsize=(lado_figura, lado_figura), 
-        dendrogram_ratio=0.15,
-        cbar_pos=(0.02, 0.8, 0.03, 0.15),
-        tree_kws={'colors': 'gray', 'linewidths': 1.5}
+        cmap="YlGnBu",
+        linewidths=0,
+        rasterized=True,  # Esto es lo que hace que el PDF no pese 100MB
+        cbar_kws={'label': 'TM-score'}
     )
 
-    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    plt.title(f"Clustermap Global - {args.output}")
     
-    # Guardado en PDF y cierre de figura
-    nombre_final = os.path.join(args.outdir, f"{args.output}_clustermap.pdf")
-    g.savefig(nombre_final, format='pdf', bbox_inches='tight')
-    print(f"Clustermap guardado en: {nombre_final}")
-    
-    plt.close() # Reemplaza a plt.show()
+    output_path = os.path.join(args.outdir, f"{args.output}_clustermap_final.pdf")
+    g.savefig(output_path, format='pdf', bbox_inches='tight')
+    plt.close()
+    gc.collect()
+    print(f"[+] Clustermap guardado en: {output_path}")
+
 def encontrar_medoide(cluster_proteinas, m_dist, etiquetas):
-    """Encuentra la proteína que es el centro (medoide) del cluster y lo notifica."""
     if len(cluster_proteinas) == 1:
         return cluster_proteinas[0]
     
-    # Índices de las proteínas del cluster en la matriz original
     indices = [etiquetas.index(p) for p in cluster_proteinas]
-    # Submatriz de distancias solo para este cluster
     submatriz = m_dist[np.ix_(indices, indices)]
-    # La proteína con la menor suma de distancias a las demás es el medoide
     indice_medoide_local = np.argmin(submatriz.sum(axis=1))
 
     medoide_elegido = cluster_proteinas[indice_medoide_local]
-    
-    # --- NOTIFICACIÓN PARA EL USUARIO ---
     print(f"   > Medoide del cluster ({len(cluster_proteinas)} prot): {medoide_elegido}")
     
     return medoide_elegido
 
 def generar_scripts_pymol(df_resultados, protein_files, m_dist, etiquetas, args):
-    """Genera archivos .pml para visualizar cada cluster en PyMOL."""
     scripts_dir = os.path.join(args.outdir, "scripts_pymol")
     os.makedirs(scripts_dir, exist_ok=True)
     
-    # Mapeo de nombre -> ruta absoluta para que PyMOL encuentre los archivos
     rutas_dict = {os.path.basename(f).split('.')[0]: os.path.abspath(f) for f in protein_files}
 
     for cluster_id in df_resultados['Cluster'].unique():
         prot_cluster = df_resultados[df_resultados['Cluster'] == cluster_id]['Proteina'].tolist()
         
-        # Solo generamos script si el cluster tiene más de 1 proteína para alinear
         if len(prot_cluster) < 2: continue 
         
         medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
@@ -260,11 +275,9 @@ def generar_scripts_pymol(df_resultados, protein_files, m_dist, etiquetas, args)
         
         with open(ruta_pml, "w") as f:
             f.write(f"# Script PyMOL - Cluster {cluster_id}\nreinitialize\n\n")
-            # Cargar el medoide (estacionario)
             f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
             f.write(f"color magenta, {medoide}\n")
             
-            # Cargar y alinear el resto (móviles)
             for prot in prot_cluster:
                 if prot == medoide: continue
                 f.write(f"load {rutas_dict[prot]}, {prot}\n")
@@ -275,6 +288,11 @@ def generar_scripts_pymol(df_resultados, protein_files, m_dist, etiquetas, args)
 def main():
     args = definir_argumentos() 
     os.makedirs(args.outdir, exist_ok=True)
+
+    print("\n" + "="*40)
+    print("   PROTWINS: Análisis de Gemelos Proteicos")
+    print("   Basado en algoritmos de Zhang Lab")
+    print("="*40 + "\n")
 
     protein_files = []
     for carpeta in args.ruta:
@@ -314,37 +332,18 @@ def main():
     cond_dist = scipy.spatial.distance.squareform(m_dist)
     agrup = linkage(cond_dist, method="average")
 
-    print("\nOptimizando umbral con Silhouette Score...")
-    umbral, k_optimo, score_optimo = optimizar_clustering(agrup, m_dist, n)
-    
-    # --- 1. OBTENER LABELS PARA PYMOL Y REPORTE ---
-    labels_clusters = fcluster(agrup, k_optimo, criterion='maxclust')
-    df_reporte = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels_clusters})
-    df_reporte.to_csv(os.path.join(args.outdir, f"{args.output}_resultados.csv"), index=False)
+    print("\n[1/2] Ejecutando Vista Estructural (TM >= 0.5)...")
+    ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.5, "estructural", args, protein_files)
 
-    # --- 2. GENERACIÓN DE GRÁFICOS ---
+    print("\n[2/2] Ejecutando Vista Funcional (TM >= 0.8)...")
+    ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.2, "funcional", args, protein_files)
 
-    # 1. ANÁLISIS BASE (Siempre se ejecuta)
-    print("\n[Base] Ejecutando Optimización Estadística (Silhouette)...")
-    umbral_sil, k_optimo, score_optimo = optimizar_clustering(agrup, m_dist, n)
-    ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral_sil, "silhouette", args, protein_files)
-
-    # 2. ANÁLISIS ESTRUCTURAL (Solo si se usa -e)
-    if args.estructural:
-        print("\n[Opcional] Ejecutando Vista Estructural ($TM \geq 0.5$)...")
-        ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.5, "estructural", args, protein_files)
-
-    # 3. ANÁLISIS FUNCIONAL (Solo si se usa -f)
-    if args.funcional:
-        print("\n[Opcional] Ejecutando Vista Funcional ($TM \geq 0.8$)...")
-        ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, 0.2, "funcional", args, protein_files)
-
+    print("\nGenerando mapas de calor y dendrogramas globales...")
     generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
     guardar_newick(agrup, etiquetas, args)
     generar_clustermap(m_sim_s, agrup, etiquetas, args)
     
-    print(f"\n[!] Finalizado. Los resultados y scripts están en: {args.outdir}")
-
+    print(f"\n[!] ProTwins ha finalizado con éxito. Los resultados están en: {args.outdir}\n")
 
 if __name__ == "__main__":
     main()
