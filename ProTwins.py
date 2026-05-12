@@ -135,8 +135,54 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     gc.collect()
 
     print(f"    [+] Dendrograma '{nombre_modo}' generado con éxito. K={k_encontrado}")
+    # --- REINTEGRACIÓN DE SCRIPTS PYMOL ---
+    # 1. Re-mapeo de rutas absoluto (asegurando que PyMOL encuentre los archivos)
+    rutas_dict = {os.path.basename(f).split('.')[0]: os.path.abspath(f) for f in protein_files}
     
-# --- FUNCIONES PARA NEWICK ---
+    # 2. Definir directorio de salida para los .pml
+    subir_dir = os.path.join(args.outdir, "scripts_pymol", nombre_modo)
+    os.makedirs(subir_dir, exist_ok=True)
+
+    # 3. Generación de archivos por cada cluster con más de 1 miembro
+    for cluster_id, medoide in medoides_por_cluster.items():
+        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
+        
+        # Solo creamos script si hay algo que alinear (medoide vs otros)
+        if len(prot_cluster) < 2: 
+            continue 
+        
+        ruta_pml = os.path.join(subir_dir, f"cluster_{cluster_id}.pml")
+        
+        try:
+            with open(ruta_pml, "w") as f:
+                f.write(f"# Script PyMOL - Proyecto: {args.output}\n")
+                f.write(f"# Modo: {nombre_modo.capitalize()} - Cluster {cluster_id}\n")
+                f.write("reinitialize\n\n")
+                
+                # Cargar el Medoide (en Magenta para que destaque)
+                f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
+                f.write(f"color magenta, {medoide}\n")
+                
+                # Cargar y alinear el resto de las proteínas del cluster
+                for prot in prot_cluster:
+                    if prot == medoide: 
+                        continue
+                    
+                    if prot in rutas_dict:
+                        f.write(f"load {rutas_dict[prot]}, {prot}\n")
+                        f.write(f"align {prot}, {medoide}\n")
+                
+                f.write("\nshow cartoon\n")
+                f.write("util.cbc\n") # Color by chain para distinguir fácil
+                f.write("orient\n")
+        except Exception as e:
+            print(f"    [!] Error generando script PyMOL para C{cluster_id}: {e}")
+
+    print(f"    [+] Análisis '{nombre_modo}' finalizado. Dendrograma y modelos PyMOL listos.")
+    print(f"    [+] Modelos guardados en: {subir_dir}")
+    gc.collect()
+    
+# --- FUNCIONES PARA NEWICK ---ss
 def construir_newick(nodo, newick, parentdist, nombres_hojas):
     if nodo.is_leaf():
         return f"{nombres_hojas[nodo.id]}:{(parentdist - nodo.dist):.6f}{newick}"
