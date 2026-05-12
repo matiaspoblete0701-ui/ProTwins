@@ -37,22 +37,17 @@ def definir_argumentos():
     return parser.parse_args()
 
 def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
-    """
-    Dendrograma con layout dinámico:
-    Los IDs de cluster (C1, C2...) se mueven automáticamente a la izquierda
-    dependiendo del largo de los nombres de las proteínas.
-    """
+    import os
     import gc
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
     from scipy.cluster.hierarchy import fcluster, dendrogram
 
-    # 1. Clustering
+    # 1. Clustering y Medoides
     labels = fcluster(agrup, umbral, criterion='distance')
     k_encontrado = len(np.unique(labels))
     
-    # 2. Medoides y Etiquetas con Asteriscos
     df_res = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels})
     df_res['Es_Medoide'] = False
     mapeo_nombres_grafico = {prot: prot for prot in etiquetas}
@@ -65,41 +60,39 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         mapeo_nombres_grafico[medoide] = f"*** {medoide}"
         medoides_por_cluster[cluster_id] = medoide
 
-    # 3. Guardar CSV
-    df_res.to_csv(os.path.join(args.outdir, f"{args.output}_{nombre_modo}_resultados.csv"), index=False)
-
-    # 4. Dendrograma Dinámico
-    # Calculamos el nombre más largo para ajustar el margen
+    # 2. Configuración Visual (Look de Tabla con Espaciado)
     nombres_finales = [mapeo_nombres_grafico[e] for e in etiquetas]
     max_char = max(len(n) for n in nombres_finales)
     
-    # Ajustamos el tamaño de la figura (más ancho si hay nombres largos)
-    ancho_base = 12 + (max_char * 0.1)
-    plt.figure(figsize=(ancho_base, max(10, len(etiquetas) * 0.3)))
+    # Altura dinámica para que no se vea apretado verticalmente
+    ancho_base = 14 + (max_char * 0.1)
+    alto_figura = max(10, len(etiquetas) * 0.3) 
     
+    fig, ax = plt.subplots(figsize=(ancho_base, alto_figura))
+    
+    # Ajustamos el margen izquierdo para que quepa la info extra
+    plt.subplots_adjust(left=0.4) 
+
     ddata = dendrogram(
         agrup, 
         labels=nombres_finales, 
         orientation='right', 
         color_threshold=umbral, 
-        above_threshold_color='grey'
+        above_threshold_color='grey',
+        leaf_font_size=10,
+        ax=ax
     )
-    
-    plt.axvline(x=umbral, color='r', linestyle='--', label=f'Umbral {nombre_modo} ({umbral:.2f})')
-    plt.plot([], [], ' ', label="*** = Medoide del cluster") 
-    plt.legend(loc='upper left')
 
-    # --- LÓGICA DE POSICIONAMIENTO DINÁMICO ---
-    ax = plt.gca()
+    # --- LÓGICA DE ALINEACIÓN ESTILO REPORTE ---
     transform = ax.get_yaxis_transform() 
-    y_coords = {leaf: 5 + i * 10 for i, leaf in enumerate(ddata['ivl'])}
+    y_coords = {leaf: i * 10 + 5 for i, leaf in enumerate(ddata['ivl'])}
     
-    # Factor de desplazamiento: 
-    # Los nombres están a la izquierda de X=0. 
-    # Desplazamos los corchetes proporcionalmente al largo del nombre máximo.
-    offset_nombres = - (max_char * 0.009) - 0.02 # Ajuste fino basado en caracteres
-    x_bracket = offset_nombres 
-    x_text = x_bracket - 0.04 # El ID del cluster un poco más a la izquierda
+    # Definimos posiciones X relativas (negativas respecto al eje 0)
+    # Aumentamos los valores para dar más "aire" (espacio)
+    x_id_cluster = -0.35    # Posición de "C1" (más a la izquierda)
+    x_bracket_back = -0.22  # Espalda del corchete
+    x_bracket_front = -0.18 # Puntas del corchete (mirando a la derecha)
+    # El espacio entre x_bracket_front y 0.0 es el aire antes del nombre
 
     for cluster_id in np.unique(labels):
         prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
@@ -109,53 +102,40 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         y_min, y_max = min(y_vals), max(y_vals)
         y_mid = (y_min + y_max) / 2
         
-        # Dibujar corchete "["
+        # 1. ID del Clúster (Alineado a la izquierda)
+        ax.text(x_id_cluster, y_mid, f"C{cluster_id}", transform=transform, 
+                va='center', ha='left', fontsize=11, fontweight='bold', clip_on=False)
+
         if len(y_vals) > 1:
-            ax.plot([x_bracket, x_bracket - 0.01, x_bracket - 0.01, x_bracket], 
+            # 2. Corchete mirando de IZQUIERDA a DERECHA [ 
+            # Dibujamos: Punta Arriba -> Espalda -> Punta Abajo
+            ax.plot([x_bracket_front, x_bracket_back, x_bracket_back, x_bracket_front], 
                     [y_min, y_min, y_max, y_max], 
-                    color='black', transform=transform, clip_on=False, lw=1.5)
-            
-            # Texto del cluster (C#)
-            ax.text(x_text, y_mid, f"C{cluster_id}", va='center', ha='right', 
-                    transform=transform, clip_on=False, fontsize=10, fontweight='bold')
+                    color='black', transform=transform, lw=2.0, clip_on=False)
         else:
-            # Para solitarios, solo el nombre del cluster
-            ax.text(x_bracket - 0.01, y_mid, f"C{cluster_id}", va='center', ha='right', 
-                    transform=transform, clip_on=False, fontsize=10, fontweight='bold')
+            # Decoración para clústeres únicos (opcional, un pequeño guión para mantener línea)
+            ax.plot([x_bracket_back, x_bracket_front], [y_mid, y_mid], 
+                    color='gray', transform=transform, lw=1.0, alpha=0.5, clip_on=False)
 
-    # Aumentamos el margen izquierdo dinámicamente para que quepa todo
-    margin_left = min(0.4, 0.15 + (max_char * 0.01))
-    plt.subplots_adjust(left=margin_left) 
+    # Estética Final
+    plt.axvline(x=umbral, color='r', linestyle='--', label=f'Umbral Funcional ({umbral:.2f})')
+    plt.legend(loc='upper right', frameon=True, shadow=True)
+    ax.set_title(f"Dendrograma de Similitud - {args.output}", fontsize=16, pad=30)
+    ax.set_xlabel("Distancia Estructural (1 - TM-score)", fontsize=12)
     
-    plt.savefig(os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrograma.pdf"), format='pdf', bbox_inches='tight')
-    plt.close()
+    # Limpiar ejes para look moderno
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', which='major', labelsize=10)
+
+    # Guardado
+    ruta_pdf = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrograma.pdf")
+    plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=300)
+    plt.close('all')
     gc.collect()
 
-    # 5. Generar Scripts de PyMOL (Lógica intacta)
-    subir_dir = os.path.join(args.outdir, "scripts_pymol", nombre_modo)
-    os.makedirs(subir_dir, exist_ok=True)
-    rutas_dict = {os.path.basename(f).split('.')[0]: os.path.abspath(f) for f in protein_files}
-
-    for cluster_id in np.unique(labels):
-        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
-        if len(prot_cluster) < 2: continue 
-        
-        medoide = medoides_por_cluster[cluster_id]
-        ruta_pml = os.path.join(subir_dir, f"cluster_{cluster_id}.pml")
-        
-        with open(ruta_pml, "w") as f:
-            f.write(f"# Script PyMOL - {nombre_modo.capitalize()} - Cluster {cluster_id}\nreinitialize\n\n")
-            f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
-            f.write(f"color magenta, {medoide}\n")
-            for prot in prot_cluster:
-                if prot == medoide: continue
-                f.write(f"load {rutas_dict[prot]}, {prot}\n")
-                f.write(f"align {prot}, {medoide}\n")
-            f.write("\nshow cartoon\nutil.cbc\norient\n")
+    print(f"    [+] Dendrograma '{nombre_modo}' generado con éxito. K={k_encontrado}")
     
-    print(f"[+] Vista '{nombre_modo}' completada. K={k_encontrado}")
-    gc.collect()
-
 # --- FUNCIONES PARA NEWICK ---
 def construir_newick(nodo, newick, parentdist, nombres_hojas):
     if nodo.is_leaf():
@@ -289,10 +269,11 @@ def main():
     args = definir_argumentos() 
     os.makedirs(args.outdir, exist_ok=True)
 
-    print("\n" + "="*40)
-    print("   PROTWINS: Análisis de Gemelos Proteicos")
-    print("   Basado en algoritmos de Zhang Lab")
-    print("="*40 + "\n")
+    print("\n" + "="*38)
+    print("    PROTWINS: Análisis Proteico ")
+    print("      De estructura y función   ")
+    print("   Basado en USalign de ZhangLab")
+    print("="*38 + "\n")
 
     protein_files = []
     for carpeta in args.ruta:
@@ -314,7 +295,7 @@ def main():
     total_comparaciones = (n * (n - 1)) // 2
     print(f"Procesando {n} estructuras ({total_comparaciones} comparaciones totales)...")
 
-    with tqdm(total=total_comparaciones, desc="Calculando TM-scores", unit="calc", colour="green") as pbar:
+    with tqdm(total=total_comparaciones, desc="Calculando TM-scores", unit="calc", colour="#228B22") as pbar:
         for i in range(n):
            for j in range(i+1, n):
                 s1, s2, tiempo = obtener_tm_score(protein_files[i], protein_files[j])
