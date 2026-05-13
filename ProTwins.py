@@ -1,6 +1,8 @@
 import glob
 import subprocess
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
@@ -37,12 +39,6 @@ def definir_argumentos():
     return parser.parse_args()
 
 def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
-    import os
-    import gc
-    import pandas as pd
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from scipy.cluster.hierarchy import fcluster, dendrogram
 
     # 1. Clustering y Medoides
     labels = fcluster(agrup, umbral, criterion='distance')
@@ -66,7 +62,7 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     
     # Altura dinámica para que no se vea apretado verticalmente
     ancho_base = 14 + (max_char * 0.1)
-    alto_figura = max(10, len(etiquetas) * 0.3) 
+    alto_figura = min(60,max(10, len(etiquetas) * 0.25))
     
     fig, ax = plt.subplots(figsize=(ancho_base, alto_figura))
     
@@ -130,7 +126,7 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
 
     # Guardado
     ruta_pdf = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrograma.pdf")
-    plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=300)
+    plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=100)
     plt.close('all')
     gc.collect()
 
@@ -218,7 +214,7 @@ def generar_heat_maps(m_sim, m_dist_sim, etiquetas, args):
     ]
     
     n_prot = len(etiquetas)
-    lado_figura = max(10, n_prot * 0.5) 
+    lado_figura = min(50,max(10, n_prot * 0.4)) 
     
     for matriz, nombre_base, mapa_color, v_min, v_max in tareas:
         plt.figure(figsize=(lado_figura, lado_figura)) 
@@ -247,10 +243,7 @@ def generar_clustermap(m_sim, agrup, etiquetas, args):
     """
     Genera un mapa de calor jerárquico (Clustermap) de las similitudes.
     """
-    import seaborn as sns
-    import matplotlib.pyplot as plt
 
-    plt.figure(figsize=(12, 12))
     
     g = sns.clustermap(
         m_sim,
@@ -261,6 +254,7 @@ def generar_clustermap(m_sim, agrup, etiquetas, args):
         cmap="YlGnBu",
         linewidths=0,
         rasterized=True,  # Esto es lo que hace que el PDF no pese 100MB
+        figsize=(12,12),
         cbar_kws={'label': 'TM-score'}
     )
 
