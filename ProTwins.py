@@ -37,7 +37,10 @@ def definir_argumentos():
     parser.add_argument("-d", "--outdir", type=str, required=True, 
                         help="Carpeta de salida (Obligatorio)")
     parser.add_argument("-u", "--umbral", type=float, nargs='+', default=[],
-                        help="Uno o más umbrales de distancia para clustering. 0.2 y 0.5 siempre se incluyen.")
+                        help="Uno o más umbrales de distancia para clustering. (Por defecto 0.2 y 0.5 en modo completo si no se especifica ninguno).")
+    # NUEVO ARGUMENTO FASE 1: Navaja Suiza / Modo Rápido
+    parser.add_argument("-md", "--makedendrogram", type=str, default=None,
+                        help="Modo rápido: Recibe la ruta a una matriz de distancia (*_distance.csv) precalculada para omitir USalign.")
     return parser.parse_args()
 
 def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
@@ -54,7 +57,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
         df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
         
-        # CORRECCIÓN: Evitar asteriscos en Singletons (solo clusters con 2 o más proteínas)
         if len(prot_cluster) >= 2:
             mapeo_nombres_grafico[medoide] = f"*** {medoide}"
         else:
@@ -84,7 +86,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         ax=ax
     )
 
-    # --- LÓGICA DE INDEXACIÓN GEOMÉTRICA CONSECUTIVA (C1, C2...) ---
     transform = ax.get_yaxis_transform() 
     y_coords = {leaf: i * 10 + 5 for i, leaf in enumerate(ddata['ivl'])}
     
@@ -92,20 +93,17 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     x_bracket_back = -0.22  
     x_bracket_front = -0.18 
 
-    # Mapear clusters válidos según su posición real en el eje Y (de arriba a abajo)
     cluster_ordenamiento = []
     for cluster_id in np.unique(labels):
         prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
         y_vals = [y_coords[mapeo_nombres_grafico[p]] for p in prot_cluster if mapeo_nombres_grafico[p] in y_coords]
         
-        if len(y_vals) >= 2: # Excluir singletons
+        if len(y_vals) >= 2:
             cluster_ordenamiento.append((cluster_id, max(y_vals), y_vals))
 
-    # Ordenar de mayor a menor coordenada Y (arriba hacia abajo en la pantalla)
     cluster_ordenamiento.sort(key=lambda x: x[1], reverse=True)
     cant_clusters_reales = len(cluster_ordenamiento)
 
-    # Dibujar brackets con nombres secuenciales limpios (C1, C2...)
     for new_id, (old_id, _, y_vals) in enumerate(cluster_ordenamiento, 1):
         y_min, y_max = min(y_vals), max(y_vals)
         y_mid = (y_min + y_max) / 2
@@ -117,7 +115,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 [y_min, y_min, y_max, y_max], 
                 color='black', transform=transform, lw=2.0, clip_on=False)
 
-    # Estética Final y Leyenda Modificada (Muestra la cantidad exacta de clusters)
     plt.axvline(x=umbral, color='r', linestyle='--', 
                 label=f'Cutoff Threshold ({umbral:.2f}) | Total Clusters (K≥2): {cant_clusters_reales}')
     plt.legend(loc='upper right', frameon=True, shadow=True)
@@ -128,7 +125,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     ax.spines['right'].set_visible(False)
     ax.tick_params(axis='both', which='major', labelsize=tamanio_fuente_hojas)
 
-    # Guardado del reporte
     ruta_pdf = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrogram.pdf")
     plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=150)
     plt.close('all')
@@ -136,7 +132,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
 
     print(f"    [+] Dendrogram '{nombre_modo}' generado. Clusters reales (K>=2)={cant_clusters_reales}")
     
-    # --- REINTEGRACIÓN DE SCRIPTS PYMOL SINCRO ---
     subir_dir = os.path.join(args.outdir, "pymol_scripts", nombre_modo)
     os.makedirs(subir_dir, exist_ok=True)
     
@@ -147,13 +142,12 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
 
     medoides_validos = []
 
-    # Iterar usando el nuevo orden consecutivo para que los archivos pml coincidan
     for new_id, (old_id, _, _) in enumerate(cluster_ordenamiento, 1):
         medoide = medoides_por_cluster[old_id]
         prot_cluster = df_res[df_res['Cluster'] == old_id]['Proteina'].tolist()
         
         medoides_validos.append(medoide)
-        ruta_pml = os.path.join(subir_dir, f"cluster_{new_id}.pml") # Guardado como cluster_1.pml, cluster_2.pml...
+        ruta_pml = os.path.join(subir_dir, f"cluster_{new_id}.pml")
         
         try:
             with open(ruta_pml, "w") as f:
@@ -167,7 +161,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
-                # Lógica de contraste consistente
                 f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
                 f.write(f"color purple, {medoide}\n")
                 
@@ -184,7 +177,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         except Exception as e:
             print(f"    [!] Error generando script PyMOL para C{new_id}: {e}")
 
-    # Generar Sesión Maestra de Medoides (Escala Fuego Dinámica basada en Distancia Real)
     if medoides_validos:
         medoids_dir = os.path.join(args.outdir, "pymol_scripts", "global_medoids")
         os.makedirs(medoids_dir, exist_ok=True)
@@ -206,7 +198,6 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
-                # El medoide superior (C1) será nuestro origen/referencia global de la escala
                 medoide_ref = medoides_validos[0]
                 idx_ref = etiquetas.index(medoide_ref)
                 
@@ -218,12 +209,10 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 min_dist = min(distancias) if distancias else 0.0
                 max_dist = max(distancias) if distancias else 1.0
 
-                # 1. EL REY (El primer medoide de arriba)
                 f.write("set_color color_medoide_fijo, [0.6, 0.0, 0.8]\n")
                 f.write(f"load {rutas_dict_master[medoide_ref]}, {medoide_ref}\n")
                 f.write(f"color color_medoide_fijo, {medoide_ref}\n\n")
                 
-                # 2. LOS SÚBDITOS (Gradiente de Fuego según disimilitud geométrica real)
                 for m in medoides_validos[1:]:
                     idx_m = etiquetas.index(m)
                     dist = m_dist[idx_m][idx_ref]
@@ -294,7 +283,7 @@ def generar_heat_maps(m_sim, m_dist_sim, etiquetas, args):
             annot=False, 
             rasterized=True,
             cbar_kws={"shrink": 0.75}
-        )    
+        )      
         
         if mostrar_etiquetas:
             ax.tick_params(axis='x', labelsize=tamanio_fuente_hm)
@@ -377,46 +366,88 @@ def main():
     print("   Basado en USalign de ZhangLab")
     print("="*38 + "\n")
 
-    protein_files = []
+    # Mapeo inicial de todos los archivos disponibles en los directorios dados por -r
+    archivos_disponibles = {}
     for carpeta in args.ruta:
         if os.path.isdir(carpeta):
-            protein_files.extend(glob.glob(os.path.join(carpeta, "*.pdb")) + 
-                                glob.glob(os.path.join(carpeta, "*.cif")) +
-                                glob.glob(os.path.join(carpeta, "*.cif.gz")) +
-                                glob.glob(os.path.join(carpeta, "*.pdb.gz")))
+            extensiones = ["*.pdb", "*.cif", "*.cif.gz", "*.pdb.gz"]
+            for ext in extensiones:
+                for f in glob.glob(os.path.join(carpeta, ext)):
+                    id_prot = os.path.basename(f).split('.')[0]
+                    archivos_disponibles[id_prot] = f
 
-    protein_files = sorted(list(set(protein_files)))
-    n = len(protein_files)
-    
-    if n < 2:
-        print("\n[!] ERROR: Se requieren al menos 2 archivos.")
-        return 
-    
-    m_sim = np.ones((n, n)) 
-    tiempo_total = 0 
-    total_comparaciones = (n * (n - 1)) // 2
-    print(f"Procesando {n} estructuras ({total_comparaciones} comparaciones totales)...")
+    # LÓGICA DE CONTROL SEGÚN LA ACTIVACIÓN DE -md
+    if args.makedendrogram:
+        print(f"[⚡] MODO RÁPIDO ACTIVADO. Omitiendo USalign y plots globales.")
+        print(f"    Cargando matriz de distancia desde: {args.makedendrogram}")
+        
+        if not os.path.exists(args.makedendrogram):
+            print(f"\n[!] ERROR: El archivo de matriz '{args.makedendrogram}' no existe.")
+            return
+        
+        # Leer matriz guardada
+        df_dist_loaded = pd.read_csv(args.makedendrogram, index_col=0)
+        etiquetas = df_dist_loaded.index.tolist()
+        m_dist = df_dist_loaded.to_numpy()
+        m_sim_s = 1 - m_dist
+        np.fill_diagonal(m_dist, 0)
+        
+        # Reconstruir protein_files alineando estrictamente con el orden del CSV
+        protein_files = []
+        for e in etiquetas:
+            if e in archivos_disponibles:
+                protein_files.append(archivos_disponibles[e])
+            else:
+                print(f"\n[!] ERROR: Falta el archivo estructural (.pdb/.cif) para '{e}' en las rutas fijadas por -r.")
+                return
+        n = len(protein_files)
+        print(f"    Matriz cargada exitosamente. Contiene {n} proteínas indexadas.")
 
-    with tqdm(total=total_comparaciones, desc="Calculando TM-scores", unit="calc", colour="#228B22") as pbar:
-        for i in range(n):
-           for j in range(i+1, n):
-                s1, s2, tiempo = obtener_tm_score(protein_files[i], protein_files[j])
-                m_sim[i][j], m_sim[j][i] = s1, s2
-                tiempo_total += tiempo  
-                pbar.update(1)
-    
-    m_sim_s = (m_sim + m_sim.T) / 2 
-    m_dist = 1 - m_sim_s
-    np.fill_diagonal(m_dist, 0) 
-    etiquetas = [os.path.basename(p).split('.')[0] for p in protein_files]
+    else:
+        # MODO TRADICIONAL COMPLETO (Calcula USalign desde cero)
+        protein_files = sorted(list(set(archivos_disponibles.values())))
+        n = len(protein_files)
+        
+        if n < 2:
+            print("\n[!] ERROR: Se requieren al menos 2 archivos estructurales en las carpetas de -r.")
+            return 
+        
+        m_sim = np.ones((n, n)) 
+        tiempo_total = 0 
+        total_comparaciones = (n * (n - 1)) // 2
+        print(f"Procesando {n} estructuras ({total_comparaciones} comparaciones totales)...")
 
-    guardar_matrices_csv(m_sim_s, m_dist, etiquetas, args)
+        with tqdm(total=total_comparaciones, desc="Calculando TM-scores", unit="calc", colour="#228B22") as pbar:
+            for i in range(n):
+               for j in range(i+1, n):
+                    s1, s2, tiempo = obtener_tm_score(protein_files[i], protein_files[j])
+                    m_sim[i][j], m_sim[j][i] = s1, s2
+                    tiempo_total += tiempo  
+                    pbar.update(1)
+        
+        m_sim_s = (m_sim + m_sim.T) / 2 
+        m_dist = 1 - m_sim_s
+        np.fill_diagonal(m_dist, 0) 
+        etiquetas = [os.path.basename(p).split('.')[0] for p in protein_files]
 
+        # Guardar únicamente en el modo tradicional completo
+        guardar_matrices_csv(m_sim_s, m_dist, etiquetas, args)
+
+    # PROCESAMIENTO COMÚN DEL ÁRBOL JERÁRQUICO
     cond_dist = scipy.spatial.distance.squareform(m_dist)
     agrup = linkage(cond_dist, method="average")
 
     umbrales_ingresados = args.umbral if args.umbral else []
-    umbrales_unicos = sorted(list(set(umbrales_ingresados + [0.2, 0.5])))
+    
+    # NUEVA LÓGICA DE FILTRADO DE UMBRALES
+    if args.makedendrogram:
+        if not umbrales_ingresados:
+            print("\n[!] ERROR: En modo rápido (-md) debes especificar al menos un umbral con '-u' (ejemplo: -u 0.35).")
+            return
+        umbrales_unicos = sorted(list(set(umbrales_ingresados)))
+    else:
+        # En modo tradicional, si no pasa nada usa [0.2, 0.5]. Si pasa algo, usa estrictamente lo solicitado.
+        umbrales_unicos = sorted(list(set(umbrales_ingresados if umbrales_ingresados else [0.2, 0.5])))
     
     print(f"\nEjecutando análisis jerárquico para los umbrales: {umbrales_unicos}")
 
@@ -424,10 +455,12 @@ def main():
         print(f"\n[{idx}/{len(umbrales_unicos)}] Procesando Umbral de Corte: {u} ...")
         ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, u, str(u), args, protein_files)
 
-    print("\nGenerando mapas de calor y dendrogramas globales...")
-    generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
-    guardar_newick(agrup, etiquetas, args)
-    generar_clustermap(m_sim_s, agrup, etiquetas, args)
+    # MAPAS GLOBALES SE ACTIVAN SÓLO EN MODO COMPLETO (Se omiten con -md)
+    if not args.makedendrogram:
+        print("\nGenerando mapas de calor y dendrogramas globales...")
+        generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
+        guardar_newick(agrup, etiquetas, args)
+        generar_clustermap(m_sim_s, agrup, etiquetas, args)
     
     print(f"\n[!] ProTwins ha finalizado con éxito. Los resultados están en: {args.outdir}\n")
 
