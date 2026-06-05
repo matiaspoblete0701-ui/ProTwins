@@ -43,7 +43,6 @@ def definir_argumentos():
 def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
     # 1. Clustering y Medoides
     labels = fcluster(agrup, umbral, criterion='distance')
-    k_encontrado = len(np.unique(labels))
     
     df_res = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels})
     df_res['Es_Medoide'] = False
@@ -54,10 +53,16 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
         medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
         df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
-        mapeo_nombres_grafico[medoide] = f"*** {medoide}"
+        
+        # CORRECCIÓN: Evitar asteriscos en Singletons (solo clusters con 2 o más proteínas)
+        if len(prot_cluster) >= 2:
+            mapeo_nombres_grafico[medoide] = f"*** {medoide}"
+        else:
+            mapeo_nombres_grafico[medoide] = medoide
+            
         medoides_por_cluster[cluster_id] = medoide
 
-    # 2. Configuración Visual Dinámica (Evitar Overlapping)
+    # 2. Configuración Visual Dinámica
     n_prot = len(etiquetas)
     nombres_finales = [mapeo_nombres_grafico[e] for e in etiquetas]
     max_char = max(len(n) for n in nombres_finales)
@@ -79,7 +84,7 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
         ax=ax
     )
 
-    # --- LÓGICA DE ALINEACIÓN ESTILO REPORTE (Sin Singletons) ---
+    # --- LÓGICA DE INDEXACIÓN GEOMÉTRICA CONSECUTIVA (C1, C2...) ---
     transform = ax.get_yaxis_transform() 
     y_coords = {leaf: i * 10 + 5 for i, leaf in enumerate(ddata['ivl'])}
     
@@ -87,25 +92,34 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     x_bracket_back = -0.22  
     x_bracket_front = -0.18 
 
+    # Mapear clusters válidos según su posición real en el eje Y (de arriba a abajo)
+    cluster_ordenamiento = []
     for cluster_id in np.unique(labels):
         prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
         y_vals = [y_coords[mapeo_nombres_grafico[p]] for p in prot_cluster if mapeo_nombres_grafico[p] in y_coords]
         
-        if not y_vals: continue
-        
-        if len(y_vals) > 1:
-            y_min, y_max = min(y_vals), max(y_vals)
-            y_mid = (y_min + y_max) / 2
-            
-            ax.text(x_id_cluster, y_mid, f"C{cluster_id}", transform=transform, 
-                    va='center', ha='left', fontsize=max(8, tamanio_fuente_hojas), fontweight='bold', clip_on=False)
-            
-            ax.plot([x_bracket_front, x_bracket_back, x_bracket_back, x_bracket_front], 
-                    [y_min, y_min, y_max, y_max], 
-                    color='black', transform=transform, lw=2.0, clip_on=False)
+        if len(y_vals) >= 2: # Excluir singletons
+            cluster_ordenamiento.append((cluster_id, max(y_vals), y_vals))
 
-    # Estética Final
-    plt.axvline(x=umbral, color='r', linestyle='--', label=f'Cutoff Threshold ({umbral:.2f})')
+    # Ordenar de mayor a menor coordenada Y (arriba hacia abajo en la pantalla)
+    cluster_ordenamiento.sort(key=lambda x: x[1], reverse=True)
+    cant_clusters_reales = len(cluster_ordenamiento)
+
+    # Dibujar brackets con nombres secuenciales limpios (C1, C2...)
+    for new_id, (old_id, _, y_vals) in enumerate(cluster_ordenamiento, 1):
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_mid = (y_min + y_max) / 2
+        
+        ax.text(x_id_cluster, y_mid, f"C{new_id}", transform=transform, 
+                va='center', ha='left', fontsize=max(8, tamanio_fuente_hojas), fontweight='bold', clip_on=False)
+        
+        ax.plot([x_bracket_front, x_bracket_back, x_bracket_back, x_bracket_front], 
+                [y_min, y_min, y_max, y_max], 
+                color='black', transform=transform, lw=2.0, clip_on=False)
+
+    # Estética Final y Leyenda Modificada (Muestra la cantidad exacta de clusters)
+    plt.axvline(x=umbral, color='r', linestyle='--', 
+                label=f'Cutoff Threshold ({umbral:.2f}) | Total Clusters (K≥2): {cant_clusters_reales}')
     plt.legend(loc='upper right', frameon=True, shadow=True)
     ax.set_title(f"Similarity Dendrogram - {args.output}", fontsize=16, pad=30)
     ax.set_xlabel("Structural Distance (1 - TM-score)", fontsize=12)
@@ -114,15 +128,15 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
     ax.spines['right'].set_visible(False)
     ax.tick_params(axis='both', which='major', labelsize=tamanio_fuente_hojas)
 
-    # Guardado (Nombre en Inglés: _dendrogram.pdf)
+    # Guardado del reporte
     ruta_pdf = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrogram.pdf")
     plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=150)
     plt.close('all')
     gc.collect()
 
-    print(f"    [+] Dendrogram '{nombre_modo}' generado con éxito. K={k_encontrado}")
+    print(f"    [+] Dendrogram '{nombre_modo}' generado. Clusters reales (K>=2)={cant_clusters_reales}")
     
-    # --- REINTEGRACIÓN DE SCRIPTS PYMOL ---
+    # --- REINTEGRACIÓN DE SCRIPTS PYMOL SINCRO ---
     subir_dir = os.path.join(args.outdir, "pymol_scripts", nombre_modo)
     os.makedirs(subir_dir, exist_ok=True)
     
@@ -133,45 +147,44 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
 
     medoides_validos = []
 
-    for cluster_id, medoide in medoides_por_cluster.items():
-        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
+    # Iterar usando el nuevo orden consecutivo para que los archivos pml coincidan
+    for new_id, (old_id, _, _) in enumerate(cluster_ordenamiento, 1):
+        medoide = medoides_por_cluster[old_id]
+        prot_cluster = df_res[df_res['Cluster'] == old_id]['Proteina'].tolist()
         
-        if len(prot_cluster) < 2: 
-            continue 
-            
         medoides_validos.append(medoide)
-        ruta_pml = os.path.join(subir_dir, f"cluster_{cluster_id}.pml")
+        ruta_pml = os.path.join(subir_dir, f"cluster_{new_id}.pml") # Guardado como cluster_1.pml, cluster_2.pml...
         
         try:
             with open(ruta_pml, "w") as f:
                 f.write(f"# Script PyMOL - Proyecto: {args.output}\n")
-                f.write(f"# Modo: {nombre_modo} - Cluster {cluster_id}\n")
+                f.write(f"# Modo: {nombre_modo} - Cluster {new_id}\n")
                 f.write("reinitialize\n\n")
                 
-                # Inyección de código autónomo de ruta para la Terminal
                 f.write("python\n")
                 f.write("import os\n")
                 f.write("_self_dir = os.path.dirname(cmd.get_script_path())\n")
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
+                # Lógica de contraste consistente
                 f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
-                f.write(f"color magenta, {medoide}\n")
+                f.write(f"color purple, {medoide}\n")
                 
                 for prot in prot_cluster:
                     if prot == medoide: 
                         continue
                     if prot in rutas_dict:
                         f.write(f"load {rutas_dict[prot]}, {prot}\n")
+                        f.write(f"color green, {prot}\n")
                         f.write(f"align {prot}, {medoide}\n")
                 
                 f.write("\nshow cartoon\n")
-                f.write("util.cbc\n") 
                 f.write("orient\n")
         except Exception as e:
-            print(f"    [!] Error generando script PyMOL para C{cluster_id}: {e}")
+            print(f"    [!] Error generando script PyMOL para C{new_id}: {e}")
 
-    # Generar Sesión Maestra de Medoides (Nombres en Inglés: global_medoids / _medoids.pml)
+    # Generar Sesión Maestra de Medoides (Escala Fuego Dinámica basada en Distancia Real)
     if medoides_validos:
         medoids_dir = os.path.join(args.outdir, "pymol_scripts", "global_medoids")
         os.makedirs(medoids_dir, exist_ok=True)
@@ -187,22 +200,52 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 f.write(f"# Script PyMOL - Global Medoids (Clusters K >= 2) - Cutoff {umbral}\n")
                 f.write("reinitialize\n\n")
                 
-                # Inyección de código autónomo de ruta para la Terminal
                 f.write("python\n")
                 f.write("import os\n")
                 f.write("_self_dir = os.path.dirname(cmd.get_script_path())\n")
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
+                # El medoide superior (C1) será nuestro origen/referencia global de la escala
                 medoide_ref = medoides_validos[0]
-                f.write(f"load {rutas_dict_master[medoide_ref]}, {medoide_ref}\n")
-                f.write(f"color cyan, {medoide_ref}\n")
+                idx_ref = etiquetas.index(medoide_ref)
                 
+                distancias = []
                 for m in medoides_validos[1:]:
+                    idx_m = etiquetas.index(m)
+                    distancias.append(m_dist[idx_m][idx_ref])
+                    
+                min_dist = min(distancias) if distancias else 0.0
+                max_dist = max(distancias) if distancias else 1.0
+
+                # 1. EL REY (El primer medoide de arriba)
+                f.write("set_color color_medoide_fijo, [0.6, 0.0, 0.8]\n")
+                f.write(f"load {rutas_dict_master[medoide_ref]}, {medoide_ref}\n")
+                f.write(f"color color_medoide_fijo, {medoide_ref}\n\n")
+                
+                # 2. LOS SÚBDITOS (Gradiente de Fuego según disimilitud geométrica real)
+                for m in medoides_validos[1:]:
+                    idx_m = etiquetas.index(m)
+                    dist = m_dist[idx_m][idx_ref]
+                    
+                    if max_dist != min_dist:
+                        norm = (dist - min_dist) / (max_dist - min_dist)
+                    else:
+                        norm = 0.0
+                        
+                    r = 1.0
+                    g = norm
+                    b = 0.0
+                    
+                    nombre_color = f"color_dist_{m}"
+                    f.write(f"set_color {nombre_color}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
                     f.write(f"load {rutas_dict_master[m]}, {m}\n")
+                    f.write(f"color {nombre_color}, {m}\n")
                     f.write(f"align {m}, {medoide_ref}\n")
                 
-                f.write("\nshow cartoon\nutil.cbc\norient\n")
+                f.write("\nshow cartoon\n")
+                f.write("orient\n")
+                
             print(f"    [+] Sesión maestra de medoides generada: {ruta_master}")
         except Exception as e:
             print(f"    [!] Error generando script maestro de medoides: {e}")
@@ -222,14 +265,12 @@ def construir_newick(nodo, newick, parentdist, nombres_hojas):
 def guardar_newick(agrup, etiquetas, args):
     arbol = to_tree(agrup, rd=False)
     cadena_newick = construir_newick(arbol, "", arbol.dist, etiquetas) + ";"
-    # Nombre en Inglés: _tree.nwk
     ruta_newick = os.path.join(args.outdir, f"{args.output}_tree.nwk")
     with open(ruta_newick, "w") as f:
         f.write(cadena_newick)
     print(f"Formato Newick guardado en: {ruta_newick}")
 
 def generar_heat_maps(m_sim, m_dist_sim, etiquetas, args):
-    # Nombres en Inglés: similarity / distance
     tareas = [
         (m_sim, "similarity", "coolwarm", 0, 1),
         (m_dist_sim, "distance", "viridis", 0, 1)
@@ -296,7 +337,6 @@ def generar_clustermap(m_sim, agrup, etiquetas, args):
         
     plt.title(f"Global Clustermap - {args.output}")
     
-    # Nombre en Inglés: _clustermap_final.pdf
     output_path = os.path.join(args.outdir, f"{args.output}_clustermap_final.pdf")
     g.savefig(output_path, format='pdf', bbox_inches='tight', dpi=150)
     plt.close()
@@ -317,7 +357,6 @@ def encontrar_medoide(cluster_proteinas, m_dist, etiquetas):
     return medoide_elegido
 
 def guardar_matrices_csv(m_sim, m_dist, etiquetas, args):
-    # Nombres en Inglés: _similarity.csv / _distance.csv
     ruta_sim = os.path.join(args.outdir, f"{args.output}_similarity.csv")
     ruta_dist = os.path.join(args.outdir, f"{args.output}_distance.csv")
     
