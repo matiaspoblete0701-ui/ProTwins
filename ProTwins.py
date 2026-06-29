@@ -64,7 +64,7 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
             
         medoides_por_cluster[cluster_id] = medoide
 
-    # 2. Configuración Visual Dinámica
+    # 2. Configuración Visual Dinámica (Dendrograma)
     n_prot = len(etiquetas)
     nombres_finales = [mapeo_nombres_grafico[e] for e in etiquetas]
     max_char = max(len(n) for n in nombres_finales)
@@ -142,6 +142,7 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
 
     medoides_validos = []
 
+    # BUCLE DE GENERACIÓN DE SCRIPTS LOCALES POR CLUSTER (AHORA CON ORDENAMIENTO ESTRICTO)
     for new_id, (old_id, _, _) in enumerate(cluster_ordenamiento, 1):
         medoide = medoides_por_cluster[old_id]
         prot_cluster = df_res[df_res['Cluster'] == old_id]['Proteina'].tolist()
@@ -161,22 +162,53 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
-                f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
-                f.write(f"color purple, {medoide}\n")
+                idx_ref = etiquetas.index(medoide)
                 
+                # 1. Creamos una lista de tuplas (proteína, distancia) EXCLUYENDO al medoide
+                miembros_con_distancia = []
                 for prot in prot_cluster:
-                    if prot == medoide: 
-                        continue
-                    if prot in rutas_dict:
-                        f.write(f"load {rutas_dict[prot]}, {prot}\n")
-                        f.write(f"color green, {prot}\n")
-                        f.write(f"align {prot}, {medoide}\n")
+                    if prot != medoide and prot in rutas_dict:
+                        idx_p = etiquetas.index(prot)
+                        dist = m_dist[idx_p][idx_ref]
+                        miembros_con_distancia.append((prot, dist))
+                
+                # 2. ORDENAMOS LA LISTA POR DISTANCIA (De menor a mayor)
+                # Esto garantiza que las más parecidas se carguen primero y queden arriba en PyMOL
+                miembros_con_distancia.sort(key=lambda x: x[1])
+                
+                # Extraemos los valores de distancia para normalizar el gradiente de color
+                distancias_locales = [d for _, d in miembros_con_distancia]
+                min_dist_local = min(distancias_locales) if distancias_locales else 0.0
+                max_dist_local = max(distancias_locales) if distancias_locales else 1.0
+                
+                # Cargar primero el medoide (quedará arriba del todo en la sesión de PyMOL)
+                f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
+                f.write(f"color purple, {medoide}\n\n")
+                
+                # 3. Cargar y alinear los miembros respetando el ordenamiento por distancia
+                for prot, dist in miembros_con_distancia:
+                    if max_dist_local != min_dist_local:
+                        norm = (dist - min_dist_local) / (max_dist_local - min_dist_local)
+                    else:
+                        norm = 0.0
+                        
+                    # Gradiente: norm=0 (Rojo [1,0,0]) a norm=1 (Amarillo [1,1,0])
+                    r = 1.0
+                    g = norm
+                    b = 0.0
+                    
+                    nombre_color = f"color_dist_{prot}"
+                    f.write(f"set_color {nombre_color}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
+                    f.write(f"load {rutas_dict[prot]}, {prot}\n")
+                    f.write(f"color {nombre_color}, {prot}\n")
+                    f.write(f"align {prot}, {medoide}\n")
                 
                 f.write("\nshow cartoon\n")
                 f.write("orient\n")
         except Exception as e:
             print(f"    [!] Error generando script PyMOL para C{new_id}: {e}")
 
+    # CONFIGURACIÓN DEL SCRIPT MAESTRO GLOBAL (SE MANTIENE IGUAL)
     if medoides_validos:
         medoids_dir = os.path.join(args.outdir, "pymol_scripts", "global_medoids")
         os.makedirs(medoids_dir, exist_ok=True)
@@ -366,7 +398,6 @@ def main():
     print("   Basado en USalign de ZhangLab")
     print("="*38 + "\n")
 
-    # Mapeo inicial de todos los archivos disponibles en los directorios dados por -r
     archivos_disponibles = {}
     for carpeta in args.ruta:
         if os.path.isdir(carpeta):
@@ -376,7 +407,6 @@ def main():
                     id_prot = os.path.basename(f).split('.')[0]
                     archivos_disponibles[id_prot] = f
 
-    # LÓGICA DE CONTROL SEGÚN LA ACTIVACIÓN DE -md
     if args.makedendrogram:
         print(f"[⚡] MODO RÁPIDO ACTIVADO. Omitiendo USalign y plots globales.")
         print(f"    Cargando matriz de distancia desde: {args.makedendrogram}")
@@ -385,14 +415,12 @@ def main():
             print(f"\n[!] ERROR: El archivo de matriz '{args.makedendrogram}' no existe.")
             return
         
-        # Leer matriz guardada
         df_dist_loaded = pd.read_csv(args.makedendrogram, index_col=0)
         etiquetas = df_dist_loaded.index.tolist()
         m_dist = df_dist_loaded.to_numpy()
         m_sim_s = 1 - m_dist
         np.fill_diagonal(m_dist, 0)
         
-        # Reconstruir protein_files alineando estrictamente con el orden del CSV
         protein_files = []
         for e in etiquetas:
             if e in archivos_disponibles:
@@ -404,7 +432,6 @@ def main():
         print(f"    Matriz cargada exitosamente. Contiene {n} proteínas indexadas.")
 
     else:
-        # MODO TRADICIONAL COMPLETO (Calcula USalign desde cero)
         protein_files = sorted(list(set(archivos_disponibles.values())))
         n = len(protein_files)
         
@@ -430,23 +457,19 @@ def main():
         np.fill_diagonal(m_dist, 0) 
         etiquetas = [os.path.basename(p).split('.')[0] for p in protein_files]
 
-        # Guardar únicamente en el modo tradicional completo
         guardar_matrices_csv(m_sim_s, m_dist, etiquetas, args)
 
-    # PROCESAMIENTO COMÚN DEL ÁRBOL JERÁRQUICO
     cond_dist = scipy.spatial.distance.squareform(m_dist)
     agrup = linkage(cond_dist, method="average")
 
     umbrales_ingresados = args.umbral if args.umbral else []
     
-    # NUEVA LÓGICA DE FILTRADO DE UMBRALES
     if args.makedendrogram:
         if not umbrales_ingresados:
             print("\n[!] ERROR: En modo rápido (-md) debes especificar al menos un umbral con '-u' (ejemplo: -u 0.35).")
             return
         umbrales_unicos = sorted(list(set(umbrales_ingresados)))
     else:
-        # En modo tradicional, si no pasa nada usa [0.2, 0.5]. Si pasa algo, usa estrictamente lo solicitado.
         umbrales_unicos = sorted(list(set(umbrales_ingresados if umbrales_ingresados else [0.2, 0.5])))
     
     print(f"\nEjecutando análisis jerárquico para los umbrales: {umbrales_unicos}")
@@ -455,7 +478,6 @@ def main():
         print(f"\n[{idx}/{len(umbrales_unicos)}] Procesando Umbral de Corte: {u} ...")
         ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, u, str(u), args, protein_files)
 
-    # MAPAS GLOBALES SE ACTIVAN SÓLO EN MODO COMPLETO (Se omiten con -md)
     if not args.makedendrogram:
         print("\nGenerando mapas de calor y dendrogramas globales...")
         generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
