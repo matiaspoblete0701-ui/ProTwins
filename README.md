@@ -29,6 +29,7 @@ g++ -O3 -ffast-math -lm -o USalign USalign.cpp
 
 ## Requirements & Installation
 
+```bash
 ### 1. Clone the Repository
 git clone https://github.com/matiaspoblete0701-ui/ProTwins
 cd ProTwins
