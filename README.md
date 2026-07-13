@@ -15,17 +15,6 @@
 
 ProTwins relies on a local binary execution of USalign to perform high-throughput structural alignments. Because the script invokes this program via a relative command ("./USalign"), the binary must always be located in the current working directory from which you open the terminal and execute the command.
 
-
-## Requirements & Installation
-```bash
-### 1. Clone the Repository
-git clone https://github.com/matiaspoblete0701-ui/ProTwins
-cd ProTwins
-
-### 2. Install the requiriments 
-pip install -r requirements.txt
-```
-
 ## Step-by-Step Compilation in the Linux Terminal
 
 Open your Linux terminal and run the following commands to clone and compile the official USalign source code from its repository:
@@ -38,4 +27,16 @@ cd USalign
 ### 2. Compile the C++ source code using g++
 g++ -O3 -ffast-math -lm -o USalign USalign.cpp
 ```
+
+## Requirements & Installation
+```bash
+### 1. Clone the Repository
+git clone https://github.com/matiaspoblete0701-ui/ProTwins
+cd ProTwins
+
+### 2. Install the requiriments 
+pip install -r requirements.txt
+```
+
+
 
