@@ -5,7 +5,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tqdm import tqdm
 import scipy
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster, to_tree
 import os
@@ -13,241 +12,232 @@ import time
 import argparse
 import pandas as pd
 import gc
+import requests
+import json
+import tarfile
+import shutil
+import re
+from tqdm import tqdm
 
-def obtener_tm_score(pdb1, pdb2):
-    inicio = time.perf_counter()
-    proceso = subprocess.run(["./USalign", pdb1, pdb2, "-mm", "1", "-ter", "0"], capture_output=True, text=True)
-    fin = time.perf_counter()
-    tiempo = fin - inicio
+def get_tm_score(pdb1, pdb2):
+    start_time = time.perf_counter()
+    process = subprocess.run(["./USalign", pdb1, pdb2, "-mm", "1", "-ter", "0"], capture_output=True, text=True)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
     score1, score2 = 0.0, 0.0
-    for linea in proceso.stdout.split('\n'):
-        if linea.startswith("TM-score=") and "Structure_1" in linea:
-            score1 = float(linea.split()[1])
-        if linea.startswith("TM-score=") and "Structure_2" in linea:
-            score2 = float(linea.split()[1])
-            return score1, score2, tiempo
-    return score1, score2, tiempo
+    for line in process.stdout.split('\n'):
+        if line.startswith("TM-score=") and "Structure_1" in line:
+            score1 = float(line.split()[1])
+        if line.startswith("TM-score=") and "Structure_2" in line:
+            score2 = float(line.split()[1])
+            return score1, score2, elapsed_time
+    return score1, score2, elapsed_time
 
-def definir_argumentos():
-    parser = argparse.ArgumentParser(description="ProTwins: Análisis de Similitud Estructural y Funcional de Proteínas")
-    parser.add_argument("-r", "--ruta", nargs='+', required=True,
-                        help="Ruta(s) a las carpetas que contienen archivos .pdb o .cif")
+def define_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-r", "--path", nargs='+', required=True,
+                        help="Path(s) to folders containing .pdb or .cif files")
     parser.add_argument("-o", "--output", type=str, required=True, 
-                        help="Prefijo para los archivos generados (Obligatorio)")
-    parser.add_argument("-d", "--outdir", type=str, required=True, 
-                        help="Carpeta de salida (Obligatorio)")
-    parser.add_argument("-u", "--umbral", type=float, nargs='+', default=[],
-                        help="Uno o más umbrales de distancia para clustering. (Por defecto 0.2 y 0.5 en modo completo si no se especifica ninguno).")
-    # NUEVO ARGUMENTO FASE 1: Navaja Suiza / Modo Rápido
+                        help="Prefix for generated files (Required)")
+    parser.add_argument("-d", "--directory", type=str, required=True, 
+                        help="Output directory (Required)")
+    parser.add_argument("-u", "--threshold", type=float, nargs='+', default=[],
+                        help="One or more distance thresholds for clustering. (Defaults to 0.2 and 0.5 in complete mode if none specified).")
     parser.add_argument("-md", "--makedendrogram", type=str, default=None,
-                        help="Modo rápido: Recibe la ruta a una matriz de distancia (*_distance.csv) precalculada para omitir USalign.")
+                        help="Fast mode: Receives the path to a precomputed distance matrix (*_distance.csv) to skip USalign.")
+    parser.add_argument("-fs", "--foldseek", type=int, default=None, choices=[1, 2, 3, 4],
+                        help="4 options, 1: TM-score calculation and medoid search in Foldseek, 2: TM-score calculation and search of all proteins in Foldseek, " \
+                             "3: No TM-score calculation, medoid search (requires a distance matrix and must be used in conjunction with -md), 4: Search of all proteins without calculating TM-score")
     return parser.parse_args()
 
-def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, args, protein_files):
-    # 1. Clustering y Medoides
-    labels = fcluster(agrup, umbral, criterion='distance')
+def execute_threshold_analysis(linkage_matrix, dist_matrix, labels, threshold, mode_name, args, protein_files):
+    cluster_labels = fcluster(linkage_matrix, threshold, criterion='distance')
     
-    df_res = pd.DataFrame({"Proteina": etiquetas, "Cluster": labels})
-    df_res['Es_Medoide'] = False
-    mapeo_nombres_grafico = {prot: prot for prot in etiquetas}
-    medoides_por_cluster = {}
+    df_res = pd.DataFrame({"Protein": labels, "Cluster": cluster_labels})
+    df_res['Is_Medoid'] = False
+    graph_name_mapping = {prot: prot for prot in labels}
+    medoids_by_cluster = {}
 
-    for cluster_id in np.unique(labels):
-        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
-        medoide = encontrar_medoide(prot_cluster, m_dist, etiquetas)
-        df_res.loc[df_res['Proteina'] == medoide, 'Es_Medoide'] = True
+    for cluster_id in np.unique(cluster_labels):
+        cluster_prots = df_res[df_res['Cluster'] == cluster_id]['Protein'].tolist()
+        medoid = find_medoid(cluster_prots, dist_matrix, labels)
+        df_res.loc[df_res['Protein'] == medoid, 'Is_Medoid'] = True
         
-        if len(prot_cluster) >= 2:
-            mapeo_nombres_grafico[medoide] = f"*** {medoide}"
+        if len(cluster_prots) >= 2:
+            graph_name_mapping[medoid] = f"*** {medoid}"
         else:
-            mapeo_nombres_grafico[medoide] = medoide
+            graph_name_mapping[medoid] = medoid
             
-        medoides_por_cluster[cluster_id] = medoide
+        medoids_by_cluster[cluster_id] = medoid
 
-    # 2. Configuración Visual Dinámica (Dendrograma)
-    n_prot = len(etiquetas)
-    nombres_finales = [mapeo_nombres_grafico[e] for e in etiquetas]
-    max_char = max(len(n) for n in nombres_finales)
+    n_prot = len(labels)
+    final_names = [graph_name_mapping[e] for e in labels]
+    max_char = max(len(n) for n in final_names)
     
-    ancho_base = 14 + (max_char * 0.15)
-    alto_figura = max(10, n_prot * 0.3) 
-    tamanio_fuente_hojas = max(4, min(10, 600 / n_prot)) 
+    base_width = 14 + (max_char * 0.15)
+    fig_height = max(10, n_prot * 0.3) 
+    leaf_font_size = max(4, min(10, 600 / n_prot)) 
     
-    fig, ax = plt.subplots(figsize=(ancho_base, alto_figura))
+    fig, ax = plt.subplots(figsize=(base_width, fig_height))
     plt.subplots_adjust(left=0.4) 
 
     ddata = dendrogram(
-        agrup, 
-        labels=nombres_finales, 
+        linkage_matrix, 
+        labels=final_names, 
         orientation='right', 
-        color_threshold=umbral, 
+        color_threshold=threshold, 
         above_threshold_color='grey',
-        leaf_font_size=tamanio_fuente_hojas,
+        leaf_font_size=leaf_font_size,
         ax=ax
     )
 
     transform = ax.get_yaxis_transform() 
     y_coords = {leaf: i * 10 + 5 for i, leaf in enumerate(ddata['ivl'])}
     
-    x_id_cluster = -0.35    
+    x_cluster_id = -0.35    
     x_bracket_back = -0.22  
     x_bracket_front = -0.18 
 
-    cluster_ordenamiento = []
-    for cluster_id in np.unique(labels):
-        prot_cluster = df_res[df_res['Cluster'] == cluster_id]['Proteina'].tolist()
-        y_vals = [y_coords[mapeo_nombres_grafico[p]] for p in prot_cluster if mapeo_nombres_grafico[p] in y_coords]
+    cluster_ordering = []
+    for cluster_id in np.unique(cluster_labels):
+        cluster_prots = df_res[df_res['Cluster'] == cluster_id]['Protein'].tolist()
+        y_vals = [y_coords[graph_name_mapping[p]] for p in cluster_prots if graph_name_mapping[p] in y_coords]
         
         if len(y_vals) >= 2:
-            cluster_ordenamiento.append((cluster_id, max(y_vals), y_vals))
+            cluster_ordering.append((cluster_id, max(y_vals), y_vals))
 
-    cluster_ordenamiento.sort(key=lambda x: x[1], reverse=True)
-    cant_clusters_reales = len(cluster_ordenamiento)
+    cluster_ordering.sort(key=lambda x: x[1], reverse=True)
+    real_clusters_count = len(cluster_ordering)
 
-    for new_id, (old_id, _, y_vals) in enumerate(cluster_ordenamiento, 1):
+    for new_id, (old_id, _, y_vals) in enumerate(cluster_ordering, 1):
         y_min, y_max = min(y_vals), max(y_vals)
         y_mid = (y_min + y_max) / 2
         
-        ax.text(x_id_cluster, y_mid, f"C{new_id}", transform=transform, 
-                va='center', ha='left', fontsize=max(8, tamanio_fuente_hojas), fontweight='bold', clip_on=False)
+        ax.text(x_cluster_id, y_mid, f"C{new_id}", transform=transform, 
+                va='center', ha='left', fontsize=max(8, leaf_font_size), fontweight='bold', clip_on=False)
         
         ax.plot([x_bracket_front, x_bracket_back, x_bracket_back, x_bracket_front], 
                 [y_min, y_min, y_max, y_max], 
                 color='black', transform=transform, lw=2.0, clip_on=False)
 
-    plt.axvline(x=umbral, color='r', linestyle='--', 
-                label=f'Cutoff Threshold ({umbral:.2f}) | Total Clusters (K≥2): {cant_clusters_reales}')
+    plt.axvline(x=threshold, color='r', linestyle='--', label=f'Cutoff Threshold ({threshold:.2f}) | Total Clusters (K>=2): {real_clusters_count}')
     plt.legend(loc='upper right', frameon=True, shadow=True)
     ax.set_title(f"Similarity Dendrogram - {args.output}", fontsize=16, pad=30)
     ax.set_xlabel("Structural Distance (1 - TM-score)", fontsize=12)
     
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.tick_params(axis='both', which='major', labelsize=tamanio_fuente_hojas)
+    ax.tick_params(axis='both', which='major', labelsize=leaf_font_size)
 
-    ruta_pdf = os.path.join(args.outdir, f"{args.output}_{nombre_modo}_dendrogram.pdf")
-    plt.savefig(ruta_pdf, format='pdf', bbox_inches='tight', dpi=150)
+    pdf_path = os.path.join(args.directory, f"{args.output}_{mode_name}_dendrogram.pdf")
+    plt.savefig(pdf_path, format='pdf', bbox_inches='tight', dpi=150)
     plt.close('all')
     gc.collect()
 
-    print(f"    [+] Dendrogram '{nombre_modo}' generado. Clusters reales (K>=2)={cant_clusters_reales}")
+    print(f"Dendrogram '{mode_name}' generated.")
     
-    subir_dir = os.path.join(args.outdir, "pymol_scripts", nombre_modo)
-    os.makedirs(subir_dir, exist_ok=True)
+    upload_dir = os.path.join(args.directory, "pymol_scripts", mode_name)
+    os.makedirs(upload_dir, exist_ok=True)
     
-    rutas_dict = {}
+    paths_dict = {}
     for f in protein_files:
-        nombre = os.path.basename(f).split('.')[0]
-        rutas_dict[nombre] = os.path.relpath(f, start=subir_dir)
+        name = os.path.basename(f).split('.')[0]
+        paths_dict[name] = os.path.relpath(f, start=upload_dir)
 
-    medoides_validos = []
+    valid_medoids = []
 
-    # BUCLE DE GENERACIÓN DE SCRIPTS LOCALES POR CLUSTER (AHORA CON ORDENAMIENTO ESTRICTO)
-    for new_id, (old_id, _, _) in enumerate(cluster_ordenamiento, 1):
-        medoide = medoides_por_cluster[old_id]
-        prot_cluster = df_res[df_res['Cluster'] == old_id]['Proteina'].tolist()
+    for new_id, (old_id, _, _) in enumerate(cluster_ordering, 1):
+        medoid = medoids_by_cluster[old_id]
+        cluster_prots = df_res[df_res['Cluster'] == old_id]['Protein'].tolist()
         
-        medoides_validos.append(medoide)
-        ruta_pml = os.path.join(subir_dir, f"cluster_{new_id}.pml")
+        valid_medoids.append(medoid)
+        pml_path = os.path.join(upload_dir, f"cluster_{new_id}.pml")
         
         try:
-            with open(ruta_pml, "w") as f:
-                f.write(f"# Script PyMOL - Proyecto: {args.output}\n")
-                f.write(f"# Modo: {nombre_modo} - Cluster {new_id}\n")
-                f.write("reinitialize\n\n")
-                
+            with open(pml_path, "w") as f:
+                f.write(f"reinitialize\n\n")
                 f.write("python\n")
                 f.write("import os\n")
                 f.write("_self_dir = os.path.dirname(cmd.get_script_path())\n")
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
-                idx_ref = etiquetas.index(medoide)
+                ref_idx = labels.index(medoid)
                 
-                # 1. Creamos una lista de tuplas (proteína, distancia) EXCLUYENDO al medoide
-                miembros_con_distancia = []
-                for prot in prot_cluster:
-                    if prot != medoide and prot in rutas_dict:
-                        idx_p = etiquetas.index(prot)
-                        dist = m_dist[idx_p][idx_ref]
-                        miembros_con_distancia.append((prot, dist))
+                members_with_distance = []
+                for prot in cluster_prots:
+                    if prot != medoid and prot in paths_dict:
+                        idx_p = labels.index(prot)
+                        dist = dist_matrix[idx_p][ref_idx]
+                        members_with_distance.append((prot, dist))
                 
-                # 2. ORDENAMOS LA LISTA POR DISTANCIA (De menor a mayor)
-                # Esto garantiza que las más parecidas se carguen primero y queden arriba en PyMOL
-                miembros_con_distancia.sort(key=lambda x: x[1])
+                members_with_distance.sort(key=lambda x: x[1])
                 
-                # Extraemos los valores de distancia para normalizar el gradiente de color
-                distancias_locales = [d for _, d in miembros_con_distancia]
-                min_dist_local = min(distancias_locales) if distancias_locales else 0.0
-                max_dist_local = max(distancias_locales) if distancias_locales else 1.0
+                local_distances = [d for _, d in members_with_distance]
+                min_local_dist = min(local_distances) if local_distances else 0.0
+                max_local_dist = max(local_distances) if local_distances else 1.0
                 
-                # Cargar primero el medoide (quedará arriba del todo en la sesión de PyMOL)
-                f.write(f"load {rutas_dict[medoide]}, {medoide}\n")
-                f.write(f"color purple, {medoide}\n\n")
+                f.write(f"load {paths_dict[medoid]}, {medoid}\n")
+                f.write(f"color purple, {medoid}\n\n")
                 
-                # 3. Cargar y alinear los miembros respetando el ordenamiento por distancia
-                for prot, dist in miembros_con_distancia:
-                    if max_dist_local != min_dist_local:
-                        norm = (dist - min_dist_local) / (max_dist_local - min_dist_local)
+                for prot, dist in members_with_distance:
+                    if max_local_dist != min_local_dist:
+                        norm = (dist - min_local_dist) / (max_local_dist - min_local_dist)
                     else:
                         norm = 0.0
                         
-                    # Gradiente: norm=0 (Rojo [1,0,0]) a norm=1 (Amarillo [1,1,0])
                     r = 1.0
                     g = norm
                     b = 0.0
                     
-                    nombre_color = f"color_dist_{prot}"
-                    f.write(f"set_color {nombre_color}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
-                    f.write(f"load {rutas_dict[prot]}, {prot}\n")
-                    f.write(f"color {nombre_color}, {prot}\n")
-                    f.write(f"align {prot}, {medoide}\n")
+                    color_name = f"color_dist_{prot}"
+                    f.write(f"set_color {color_name}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
+                    f.write(f"load {paths_dict[prot]}, {prot}\n")
+                    f.write(f"color {color_name}, {prot}\n")
+                    f.write(f"align {prot}, {medoid}\n")
                 
                 f.write("\nshow cartoon\n")
                 f.write("orient\n")
-        except Exception as e:
-            print(f"    [!] Error generando script PyMOL para C{new_id}: {e}")
+        except Exception:
+            pass
 
-    # CONFIGURACIÓN DEL SCRIPT MAESTRO GLOBAL (SE MANTIENE IGUAL)
-    if medoides_validos:
-        medoids_dir = os.path.join(args.outdir, "pymol_scripts", "global_medoids")
+    if valid_medoids:
+        medoids_dir = os.path.join(args.directory, "pymol_scripts", "global_medoids")
         os.makedirs(medoids_dir, exist_ok=True)
-        ruta_master = os.path.join(medoids_dir, f"{umbral}_medoids.pml")
+        master_path = os.path.join(medoids_dir, f"{threshold}_medoids.pml")
         
-        rutas_dict_master = {}
+        master_paths_dict = {}
         for f in protein_files:
-            nombre = os.path.basename(f).split('.')[0]
-            rutas_dict_master[nombre] = os.path.relpath(f, start=medoids_dir)
+            name = os.path.basename(f).split('.')[0]
+            master_paths_dict[name] = os.path.relpath(f, start=medoids_dir)
 
         try:
-            with open(ruta_master, "w") as f:
-                f.write(f"# Script PyMOL - Global Medoids (Clusters K >= 2) - Cutoff {umbral}\n")
+            with open(master_path, "w") as f:
                 f.write("reinitialize\n\n")
-                
                 f.write("python\n")
                 f.write("import os\n")
                 f.write("_self_dir = os.path.dirname(cmd.get_script_path())\n")
                 f.write("if _self_dir: os.chdir(_self_dir)\n")
                 f.write("python end\n\n")
                 
-                medoide_ref = medoides_validos[0]
-                idx_ref = etiquetas.index(medoide_ref)
+                ref_medoid = valid_medoids[0]
+                ref_idx = labels.index(ref_medoid)
                 
-                distancias = []
-                for m in medoides_validos[1:]:
-                    idx_m = etiquetas.index(m)
-                    distancias.append(m_dist[idx_m][idx_ref])
+                distances = []
+                for m in valid_medoids[1:]:
+                    idx_m = labels.index(m)
+                    distances.append(dist_matrix[idx_m][ref_idx])
                     
-                min_dist = min(distancias) if distancias else 0.0
-                max_dist = max(distancias) if distancias else 1.0
+                min_dist = min(distances) if distances else 0.0
+                max_dist = max(distances) if distances else 1.0
 
-                f.write("set_color color_medoide_fijo, [0.6, 0.0, 0.8]\n")
-                f.write(f"load {rutas_dict_master[medoide_ref]}, {medoide_ref}\n")
-                f.write(f"color color_medoide_fijo, {medoide_ref}\n\n")
+                f.write("set_color color_fixed_medoid, [0.6, 0.0, 0.8]\n")
+                f.write(f"load {master_paths_dict[ref_medoid]}, {ref_medoid}\n")
+                f.write(f"color color_fixed_medoid, {ref_medoid}\n\n")
                 
-                for m in medoides_validos[1:]:
-                    idx_m = etiquetas.index(m)
-                    dist = m_dist[idx_m][idx_ref]
+                for m in valid_medoids[1:]:
+                    idx_m = labels.index(m)
+                    dist = dist_matrix[idx_m][ref_idx]
                     
                     if max_dist != min_dist:
                         norm = (dist - min_dist) / (max_dist - min_dist)
@@ -258,233 +248,352 @@ def ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, umbral, nombre_modo, 
                     g = norm
                     b = 0.0
                     
-                    nombre_color = f"color_dist_{m}"
-                    f.write(f"set_color {nombre_color}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
-                    f.write(f"load {rutas_dict_master[m]}, {m}\n")
-                    f.write(f"color {nombre_color}, {m}\n")
-                    f.write(f"align {m}, {medoide_ref}\n")
+                    color_name = f"color_dist_{m}"
+                    f.write(f"set_color {color_name}, [{r:.3f}, {g:.3f}, {b:.3f}]\n")
+                    f.write(f"load {master_paths_dict[m]}, {m}\n")
+                    f.write(f"color {color_name}, {m}\n")
+                    f.write(f"align {m}, {ref_medoid}\n")
                 
                 f.write("\nshow cartoon\n")
                 f.write("orient\n")
                 
-            print(f"    [+] Sesión maestra de medoides generada: {ruta_master}")
-        except Exception as e:
-            print(f"    [!] Error generando script maestro de medoides: {e}")
+        except Exception:
+            pass
 
-    print(f"    [+] Análisis '{nombre_modo}' finalizado. Modelos guardados en: {subir_dir}")
     gc.collect()
-    
-def construir_newick(nodo, newick, parentdist, nombres_hojas):
-    if nodo.is_leaf():
-        return f"{nombres_hojas[nodo.id]}:{(parentdist - nodo.dist):.6f}{newick}"
+    return valid_medoids
+
+def build_newick(node, newick, parentdist, leaf_names):
+    if node.is_leaf():
+        return f"{leaf_names[node.id]}:{(parentdist - node.dist):.6f}{newick}"
     else:
         if len(newick) > 0:
             newick = f":{(parentdist - nodo.dist):.6f}{newick}"
-        newick = f"({construir_newick(nodo.left, '', nodo.dist, nombres_hojas)},{construir_newick(nodo.right, '', nodo.dist, nombres_hojas)}){newick}"
+        newick = f"({build_newick(node.left, '', node.dist, leaf_names)},{build_newick(node.right, '', node.dist, leaf_names)}){newick}"
         return newick
 
-def guardar_newick(agrup, etiquetas, args):
-    arbol = to_tree(agrup, rd=False)
-    cadena_newick = construir_newick(arbol, "", arbol.dist, etiquetas) + ";"
-    ruta_newick = os.path.join(args.outdir, f"{args.output}_tree.nwk")
-    with open(ruta_newick, "w") as f:
-        f.write(cadena_newick)
-    print(f"Formato Newick guardado en: {ruta_newick}")
+def save_newick(linkage_matrix, labels, args):
+    tree = to_tree(linkage_matrix, rd=False)
+    newick_string = build_newick(tree, "", tree.dist, labels) + ";"
+    newick_path = os.path.join(args.directory, f"{args.output}_tree.nwk")
+    with open(newick_path, "w") as f:
+        f.write(newick_string)
 
-def generar_heat_maps(m_sim, m_dist_sim, etiquetas, args):
-    tareas = [
-        (m_sim, "similarity", "coolwarm", 0, 1),
-        (m_dist_sim, "distance", "viridis", 0, 1)
+def generate_heat_maps(sim_matrix, dist_matrix, labels, args):
+    tasks = [
+        (sim_matrix, "similarity", "coolwarm", 0, 1),
+        (dist_matrix, "distance", "viridis", 0, 1)
     ]
     
-    n_prot = len(etiquetas)
-    lado_figura = min(50, max(12, n_prot * 0.35)) 
-    tamanio_fuente_hm = max(3, min(10, 400 / n_prot))
+    n_prot = len(labels)
+    fig_side = min(50, max(12, n_prot * 0.35)) 
+    hm_font_size = max(3, min(10, 400 / n_prot))
+    show_labels = n_prot <= 150
     
-    mostrar_etiquetas = n_prot <= 150
-    
-    for matriz, nombre_base, mapa_color, v_min, v_max in tareas:
-        plt.figure(figsize=(lado_figura, lado_figura)) 
-        ax = sns.heatmap(
-            matriz, 
-            xticklabels=etiquetas if mostrar_etiquetas else False, 
-            yticklabels=etiquetas if mostrar_etiquetas else False, 
-            cmap=mapa_color, 
-            vmin=v_min, 
-            vmax=v_max,
-            annot=False, 
-            rasterized=True,
-            cbar_kws={"shrink": 0.75}
-        )      
-        
-        if mostrar_etiquetas:
-            ax.tick_params(axis='x', labelsize=tamanio_fuente_hm)
-            ax.tick_params(axis='y', labelsize=tamanio_fuente_hm)
+    for matrix, base_name, color_map, v_min, v_max in tasks:
+        plt.figure(figsize=(fig_side, fig_side)) 
+        ax = sns.heatmap(matrix, xticklabels=labels if show_labels else False, 
+                         yticklabels=labels if show_labels else False, cmap=color_map, 
+                         vmin=v_min, vmax=v_max, annot=False, rasterized=True, cbar_kws={"shrink": 0.75})      
+        if show_labels:
+            ax.tick_params(axis='x', labelsize=hm_font_size)
+            ax.tick_params(axis='y', labelsize=hm_font_size)
             plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-            
         plt.tight_layout()
-        
-        nombre_final = os.path.join(args.outdir, f"{args.output}_{nombre_base}.pdf")
-        plt.savefig(nombre_final, format='pdf', bbox_inches='tight', dpi=150)
-        print(f"    [+] Heatmap guardado en: {nombre_final}")
-        
+        final_name = os.path.join(args.directory, f"{args.output}_{base_name}.pdf")
+        plt.savefig(final_name, format='pdf', bbox_inches='tight', dpi=150)
         plt.close() 
         gc.collect()
 
-def generar_clustermap(m_sim, agrup, etiquetas, args):
-    n_prot = len(etiquetas)
-    lado_figura = min(50, max(14, n_prot * 0.3))
-    tamanio_fuente_cm = max(4, min(10, 400 / n_prot))
+def generate_clustermap(sim_matrix, linkage_matrix, labels, args):
+    n_prot = len(labels)
+    fig_side = min(50, max(14, n_prot * 0.3))
+    cm_font_size = max(4, min(10, 400 / n_prot))
+    show_labels = n_prot <= 150
     
-    mostrar_etiquetas = n_prot <= 150
-    
-    g = sns.clustermap(
-        m_sim,
-        row_linkage=agrup,
-        col_linkage=agrup,
-        xticklabels=etiquetas if mostrar_etiquetas else False,
-        yticklabels=etiquetas if mostrar_etiquetas else False,
-        cmap="YlGnBu",
-        linewidths=0,
-        rasterized=True,  
-        figsize=(lado_figura, lado_figura),
-        cbar_pos=(0.02, 0.8, 0.05, 0.18),
-        cbar_kws={'label': 'TM-score'}
-    )
+    g = sns.clustermap(sim_matrix, row_linkage=linkage_matrix, col_linkage=linkage_matrix, xticklabels=labels if show_labels else False,
+                       yticklabels=labels if show_labels else False, cmap="YlGnBu", linewidths=0,
+                       rasterized=True, figsize=(fig_side, fig_side), cbar_pos=(0.02, 0.8, 0.05, 0.18))
 
-    if mostrar_etiquetas:
-        g.ax_heatmap.tick_params(axis='x', labelsize=tamanio_fuente_cm)
-        g.ax_heatmap.tick_params(axis='y', labelsize=tamanio_fuente_cm)
+    if show_labels:
+        g.ax_heatmap.tick_params(axis='x', labelsize=cm_font_size)
+        g.ax_heatmap.tick_params(axis='y', labelsize=cm_font_size)
         
-    plt.title(f"Global Clustermap - {args.output}")
-    
-    output_path = os.path.join(args.outdir, f"{args.output}_clustermap_final.pdf")
+    output_path = os.path.join(args.directory, f"{args.output}_clustermap_final.pdf")
     g.savefig(output_path, format='pdf', bbox_inches='tight', dpi=150)
     plt.close()
     gc.collect()
-    print(f"    [+] Clustermap guardado en: {output_path}")
 
-def encontrar_medoide(cluster_proteinas, m_dist, etiquetas):
-    if len(cluster_proteinas) == 1:
-        return cluster_proteinas[0]
-    
-    indices = [etiquetas.index(p) for p in cluster_proteinas]
-    submatriz = m_dist[np.ix_(indices, indices)]
-    indice_medoide_local = np.argmin(submatriz.sum(axis=1))
+def find_medoid(cluster_proteins, dist_matrix, labels):
+    if len(cluster_proteins) == 1:
+        return cluster_proteins[0]
+    indices = [labels.index(p) for p in cluster_proteins]
+    submatrix = dist_matrix[np.ix_(indices, indices)]
+    local_medoid_idx = np.argmin(submatrix.sum(axis=1))
+    return cluster_proteins[local_medoid_idx]
 
-    medoide_elegido = cluster_proteinas[indice_medoide_local]
-    print(f"   > Medoide del cluster ({len(cluster_proteinas)} prot): {medoide_elegido}")
-    
-    return medoide_elegido
+def save_matrices_csv(sim_matrix, dist_matrix, labels, args):
+    df_sim = pd.DataFrame(sim_matrix, index=labels, columns=labels)
+    df_dist = pd.DataFrame(dist_matrix, index=labels, columns=labels)
+    df_sim.to_csv(os.path.join(args.directory, f"{args.output}_similarity.csv"))
+    df_dist.to_csv(os.path.join(args.directory, f"{args.output}_distance.csv"))
 
-def guardar_matrices_csv(m_sim, m_dist, etiquetas, args):
-    ruta_sim = os.path.join(args.outdir, f"{args.output}_similarity.csv")
-    ruta_dist = os.path.join(args.outdir, f"{args.output}_distance.csv")
+def generate_db_link(target):
+    target_str = str(target).strip()
+    if target_str.startswith("AF-"):
+        match = re.search(r"AF-([A-Z0-9]{6,10})", target_str)
+        if match:
+            return f"https://alphafold.ebi.ac.uk/entry/{match.group(1)}"
+    match_pdb = re.search(r"\b([0-9][A-Z0-9]{3})\b", target_str.upper())
+    if match_pdb:
+        return f"https://www.rcsb.org/structure/{match_pdb.group(1)}"
+    return "N/A"
+
+def query_and_download_foldseek(pdb_path, download_dir):
+    ticket_url = "https://search.foldseek.com/api/ticket"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
-    df_sim = pd.DataFrame(m_sim, index=etiquetas, columns=etiquetas)
-    df_dist = pd.DataFrame(m_dist, index=etiquetas, columns=etiquetas)
+    try:
+        with open(pdb_path, "rb") as f:
+            files = {"q": f}
+            data = [
+                ("mode", "3diaa"), 
+                ("database[]", "bfmd"),
+                ("database[]", "gmgcl_id"),
+                ("database[]", "mgnify_esm30"),
+                ("database[]", "BFVD"),
+                ("database[]", "afdb-proteome"),
+                ("database[]", "afdb-swissprot"),
+                ("database[]", "afdb50"),
+                ("database[]", "pdb100"),
+                ("database[]", "cath50"),
+            ]
+            resp = requests.post(ticket_url, files=files, data=data, headers=headers)
+            
+        if resp.status_code != 200:
+            return None
+            
+        ticket_id = resp.json().get("id")
+        if not ticket_id: return None
+        
+        time.sleep(3)
+        status = "PENDING"
+        
+        while status in ["PENDING", "RUNNING"]:
+            time.sleep(4) 
+            status_resp = requests.get(f"https://search.foldseek.com/api/ticket/{ticket_id}", headers=headers)
+            
+            if status_resp.status_code == 200:
+                status = status_resp.json().get("status", "ERROR")
+            else:
+                break
+                
+        if status == "COMPLETE":
+            download_url = f"https://search.foldseek.com/api/result/download/{ticket_id}"
+            res_download = requests.get(download_url, headers=headers, stream=True)
+            if res_download.status_code == 200:
+                base_name = os.path.basename(pdb_path).split('.')[0]
+                tar_path = os.path.join(download_dir, f"{base_name}_foldseek_results.tar.gz")
+                with open(tar_path, 'wb') as file:
+                    for chunk in res_download.iter_content(chunk_size=8192):
+                        file.write(chunk)
+                return tar_path
+    except Exception:
+        pass
+    return None
+
+def process_foldseek_results(paths_to_search, args):
+    foldseek_dir = os.path.join(args.directory, "foldseek_results")
+    downloads_dir = os.path.join(foldseek_dir, "downloads")
+    os.makedirs(downloads_dir, exist_ok=True)
     
-    df_sim.to_csv(ruta_sim)
-    df_dist.to_csv(ruta_dist)
-    print(f"Matrices CSV guardadas en: {args.outdir}")
+    excel_data = []
+    
+    for pdb_path in tqdm(paths_to_search, desc="Processing Foldseek queries"):
+        query_name = os.path.basename(pdb_path).split('.')[0]
+        tar_path = query_and_download_foldseek(pdb_path, downloads_dir)
+        
+        if tar_path:
+            temp_dir = os.path.join(downloads_dir, f"temp_{query_name}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            try:
+                with tarfile.open(tar_path, "r:gz") as tar:
+                    tar.extractall(path=temp_dir)
+                    
+                m8_files = glob.glob(os.path.join(temp_dir, "*.m8"))
+                
+                for m8_file in m8_files:
+                    if "_report" in m8_file:
+                        continue
+                    
+                    if os.path.getsize(m8_file) == 0:
+                        continue
+                        
+                    db_name = os.path.basename(m8_file).replace("alis_", "").replace(".m8", "")
+                    
+                    try:
+                        df = pd.read_csv(m8_file, sep='\t', header=None, on_bad_lines='skip')
+                        
+                        for _, row in df.iterrows():
+                            if len(row) < 20:
+                                continue
+                                
+                            try:
+                                tm_score = float(row[10])
+                                e_val = float(row[11])
+                            except ValueError:
+                                continue
+                                
+                            target_full = str(row[1])
+                            target_clean = target_full.split(' ')[0]
+                            
+                            organism = str(row[20]).strip() if pd.notnull(row[20]) else "N/A"
+                            if organism == "" or str(row[20]).lower() == "nan":
+                                organism = "N/A"
+                            
+                            if tm_score >= 0.50:
+                                excel_data.append({
+                                    "Query Protein (Lab)": query_name,
+                                    "Hit Protein": target_clean,
+                                    "Organism Species": organism,
+                                    "Database": db_name,
+                                    "TM-score": round(tm_score, 4),
+                                    "E-value": f"{e_val:.2e}",
+                                    "Structural Link (Click)": generate_db_link(target_clean)
+                                })
+                    except Exception:
+                        continue
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        else:
+            excel_data.append({
+                "Query Protein (Lab)": query_name,
+                "Hit Protein": "Error",
+                "Organism Species": "Failed",
+                "Database": "N/A",
+                "TM-score": 0.0,
+                "E-value": "N/A",
+                "Structural Link (Click)": "N/A"
+            })
+            
+    if excel_data:
+        df_results = pd.DataFrame(excel_data)
+        
+        df_valid = df_results[df_results["Database"] != "N/A"]
+        df_errors = df_results[df_results["Database"] == "N/A"]
+        
+        if not df_valid.empty:
+            df_valid = df_valid.sort_values(
+                by=["Query Protein (Lab)", "Database", "TM-score"], 
+                ascending=[True, True, False]
+            )
+            df_valid = df_valid.drop_duplicates(
+                subset=["Query Protein (Lab)", "Database"], 
+                keep="first"
+            )
+            
+        df_results = pd.concat([df_valid, df_errors], ignore_index=True)
+        df_results = df_results.sort_values(by=["Query Protein (Lab)", "Database"])
+        
+        excel_path = os.path.join(foldseek_dir, f"{args.output}_Foldseek_Report.xlsx")
+        try:
+            df_results.to_excel(excel_path, index=False)
+            print(f"Report generated: {excel_path}")
+        except ImportError:
+            csv_path = excel_path.replace(".xlsx", ".csv")
+            df_results.to_csv(csv_path, index=False)
+            print(f"Report generated: {csv_path}")
 
 def main():
-    args = definir_argumentos() 
-    os.makedirs(args.outdir, exist_ok=True)
+    args = define_arguments() 
+    os.makedirs(args.directory, exist_ok=True)
 
-    print("\n" + "="*38)
-    print("    PROTWINS: Análisis Proteico ")
-    print("      De estructura y función   ")
-    print("   Basado en USalign de ZhangLab")
-    print("="*38 + "\n")
+    available_files = {}
+    for folder in args.path:
+        if os.path.isdir(folder):
+            extensions = ["*.pdb", "*.cif", "*.cif.gz", "*.pdb.gz"]
+            for ext in extensions:
+                for f in glob.glob(os.path.join(folder, ext)):
+                    prot_id = os.path.basename(f).split('.')[0]
+                    available_files[prot_id] = f
 
-    archivos_disponibles = {}
-    for carpeta in args.ruta:
-        if os.path.isdir(carpeta):
-            extensiones = ["*.pdb", "*.cif", "*.cif.gz", "*.pdb.gz"]
-            for ext in extensiones:
-                for f in glob.glob(os.path.join(carpeta, ext)):
-                    id_prot = os.path.basename(f).split('.')[0]
-                    archivos_disponibles[id_prot] = f
+    if args.foldseek == 4:
+        protein_files = list(available_files.values())
+        if not protein_files:
+            return
+        process_foldseek_results(protein_files, args)
+        return
 
     if args.makedendrogram:
-        print(f"[⚡] MODO RÁPIDO ACTIVADO. Omitiendo USalign y plots globales.")
-        print(f"    Cargando matriz de distancia desde: {args.makedendrogram}")
-        
         if not os.path.exists(args.makedendrogram):
-            print(f"\n[!] ERROR: El archivo de matriz '{args.makedendrogram}' no existe.")
             return
         
         df_dist_loaded = pd.read_csv(args.makedendrogram, index_col=0)
-        etiquetas = df_dist_loaded.index.tolist()
-        m_dist = df_dist_loaded.to_numpy()
-        m_sim_s = 1 - m_dist
-        np.fill_diagonal(m_dist, 0)
+        labels = df_dist_loaded.index.tolist()
+        dist_matrix = df_dist_loaded.to_numpy()
+        sim_matrix_s = 1 - dist_matrix
+        np.fill_diagonal(dist_matrix, 0)
         
         protein_files = []
-        for e in etiquetas:
-            if e in archivos_disponibles:
-                protein_files.append(archivos_disponibles[e])
+        for e in labels:
+            if e in available_files:
+                protein_files.append(available_files[e])
             else:
-                print(f"\n[!] ERROR: Falta el archivo estructural (.pdb/.cif) para '{e}' en las rutas fijadas por -r.")
                 return
-        n = len(protein_files)
-        print(f"    Matriz cargada exitosamente. Contiene {n} proteínas indexadas.")
-
     else:
-        protein_files = sorted(list(set(archivos_disponibles.values())))
+        protein_files = sorted(list(set(available_files.values())))
         n = len(protein_files)
         
         if n < 2:
-            print("\n[!] ERROR: Se requieren al menos 2 archivos estructurales en las carpetas de -r.")
             return 
         
-        m_sim = np.ones((n, n)) 
-        tiempo_total = 0 
-        total_comparaciones = (n * (n - 1)) // 2
-        print(f"Procesando {n} estructuras ({total_comparaciones} comparaciones totales)...")
-
-        with tqdm(total=total_comparaciones, desc="Calculando TM-scores", unit="calc", colour="#228B22") as pbar:
+        sim_matrix = np.ones((n, n)) 
+        total_comparisons = (n * (n - 1)) // 2
+        
+        with tqdm(total=total_comparisons, desc="Calculating TM-scores (USalign)") as pbar:
             for i in range(n):
-               for j in range(i+1, n):
-                    s1, s2, tiempo = obtener_tm_score(protein_files[i], protein_files[j])
-                    m_sim[i][j], m_sim[j][i] = s1, s2
-                    tiempo_total += tiempo  
+                for j in range(i+1, n):
+                    s1, s2, elapsed = get_tm_score(protein_files[i], protein_files[j])
+                    sim_matrix[i][j], sim_matrix[j][i] = s1, s2
                     pbar.update(1)
         
-        m_sim_s = (m_sim + m_sim.T) / 2 
-        m_dist = 1 - m_sim_s
-        np.fill_diagonal(m_dist, 0) 
-        etiquetas = [os.path.basename(p).split('.')[0] for p in protein_files]
+        sim_matrix_s = (sim_matrix + sim_matrix.T) / 2 
+        dist_matrix = 1 - sim_matrix_s
+        np.fill_diagonal(dist_matrix, 0) 
+        labels = [os.path.basename(p).split('.')[0] for p in protein_files]
 
-        guardar_matrices_csv(m_sim_s, m_dist, etiquetas, args)
+        save_matrices_csv(sim_matrix_s, dist_matrix, labels, args)
 
-    cond_dist = scipy.spatial.distance.squareform(m_dist)
-    agrup = linkage(cond_dist, method="average")
+    cond_dist = scipy.spatial.distance.squareform(dist_matrix)
+    linkage_matrix = linkage(cond_dist, method="average")
 
-    umbrales_ingresados = args.umbral if args.umbral else []
+    entered_thresholds = args.threshold if args.threshold else []
     
     if args.makedendrogram:
-        if not umbrales_ingresados:
-            print("\n[!] ERROR: En modo rápido (-md) debes especificar al menos un umbral con '-u' (ejemplo: -u 0.35).")
+        if not entered_thresholds:
             return
-        umbrales_unicos = sorted(list(set(umbrales_ingresados)))
+        unique_thresholds = sorted(list(set(entered_thresholds)))
     else:
-        umbrales_unicos = sorted(list(set(umbrales_ingresados if umbrales_ingresados else [0.2, 0.5])))
+        unique_thresholds = sorted(list(set(entered_thresholds if entered_thresholds else [0.2, 0.5])))
     
-    print(f"\nEjecutando análisis jerárquico para los umbrales: {umbrales_unicos}")
+    total_unique_medoids = set()
 
-    for idx, u in enumerate(umbrales_unicos, 1):
-        print(f"\n[{idx}/{len(umbrales_unicos)}] Procesando Umbral de Corte: {u} ...")
-        ejecutar_analisis_por_umbral(agrup, m_dist, etiquetas, u, str(u), args, protein_files)
+    for idx, u in enumerate(unique_thresholds, 1):
+        medoids_from_threshold = execute_threshold_analysis(linkage_matrix, dist_matrix, labels, u, str(u), args, protein_files)
+        total_unique_medoids.update(medoids_from_threshold)
 
     if not args.makedendrogram:
-        print("\nGenerando mapas de calor y dendrogramas globales...")
-        generar_heat_maps(m_sim_s, m_dist, etiquetas, args)
-        guardar_newick(agrup, etiquetas, args)
-        generar_clustermap(m_sim_s, agrup, etiquetas, args)
-    
-    print(f"\n[!] ProTwins ha finalizado con éxito. Los resultados están en: {args.outdir}\n")
+        generate_heat_maps(sim_matrix_s, dist_matrix, labels, args)
+        save_newick(linkage_matrix, labels, args)
+        generate_clustermap(sim_matrix_s, linkage_matrix, labels, args)
+
+    if args.foldseek:
+        if args.foldseek in [1, 3]:
+            paths_to_search = [available_files[m] for m in total_unique_medoids if m in available_files]
+            process_foldseek_results(paths_to_search, args)
+        elif args.foldseek == 2:
+            process_foldseek_results(protein_files, args)
 
 if __name__ == "__main__":
     main()
