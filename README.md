@@ -38,5 +38,73 @@ cd ProTwins
 pip install -r requirements.txt
 ```
 
+## Usage
+
+ProTwins is executed from the command line. You can display the help message and all available options by running:
+
+```bash
+python ProTwins.py --help
+
+usage: ProTwins.py [-h] -r PATH [PATH ...] -o OUTPUT -d DIRECTORY [-u THRESHOLD [THRESHOLD ...]] [-md MAKEDENDROGRAM]
+                   [-fs {1,2,3,4}]
+
+options:
+  -h, --help            show this help message and exit
+  -r PATH [PATH ...], --path PATH [PATH ...]
+                        Path(s) to folders containing .pdb or .cif files
+  -o OUTPUT, --output OUTPUT
+                        Prefix for generated files (Required)
+  -d DIRECTORY, --directory DIRECTORY
+                        Output directory (Required)
+  -u THRESHOLD [THRESHOLD ...], --threshold THRESHOLD [THRESHOLD ...]
+                        One or more distance thresholds for clustering. (Defaults to 0.2 and 0.5 in complete mode if
+                        none specified).
+  -md MAKEDENDROGRAM, --makedendrogram MAKEDENDROGRAM
+                        Fast mode: Receives the path to a precomputed distance matrix (*_distance.csv) to skip
+                        USalign.
+  -fs {1,2,3,4}, --foldseek {1,2,3,4}
+                        4 options:
+                        1: TM-score calculation and medoid search in Foldseek.
+                        2: TM-score calculation and search of all proteins in Foldseek.
+                        3: No TM-score calculation, medoid search (requires a distance matrix and must be used in conjunction with -md).
+                        4: Search of all proteins in Foldseek without calculating TM-score.
+```
+
+### Output Directory Structure
+
+markdown
+## Output Directory Structure
+
+The specified output directory (`-d/--directory`) will be structured as follows:
+```
+example of use: 
+
+python ProTwins.py -r ./my_proteins/ -o [prefix] -d ./output_directory/ -u [threshold -> (0.5 0.4)] -fs 1
+
+output_directory/
+│
+├── [prefix]_similarity.csv          # Pairwise structural similarity matrix (TM-scores)
+├── [prefix]_distance.csv            # Structural distance matrix (1 - TM-score)
+├── [prefix]_tree.nwk                 # Phylogenetic/structural tree in Newick format
+├── [prefix]_similarity.pdf          # Pairwise similarity heatmap
+├── [prefix]_distance.pdf            # Pairwise distance heatmap
+├── [prefix]_clustermap_final.pdf    # Dendrogram-coupled heatmap (Seaborn clustermap)
+├── [prefix]_[threshold]_dendrogram.pdf # Cutoff dendrogram showing colored clusters
+│
+├── foldseek_results/                 # Created if Foldseek analysis (-fs) is activated
+│   └── [prefix]_Foldseek_Report.xlsx # Consolidated Excel workbook with hits, taxonomy, E-values, and source database links
+│
+└── pymol_scripts/                    # Automated 3D visualization scripts for PyMOL
+    ├── [threshold]/                  # Individual .pml scripts to visualize and align each separate cluster
+    └── global_medoids/               # Core .pml script to align all global medoids together
+```
+
+## Authors and Citation
+
+Developed as a structural bioinformatics utility for protein analysis. 
+
+If you use ProTwins in your research, please cite this repository and the underlying tools:
+- **USalign**: Zhang, J., et al. (2022). US-align: universal structure alignment of proteins, nucleic acids and macromolecular complexes. *Nature Methods*.
+- **Foldseek**: van Kempen, M., et al. (2023). Fast and accurate protein structure search with Foldseek. *Nature Biotechnology*.
 
 
