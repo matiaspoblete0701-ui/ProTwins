@@ -99,6 +99,27 @@ output_directory/
     └── global_medoids/               # Core .pml script to align all global medoids together
 ```
 
+### Crucial Directory Structure for PyMOL Execution
+
+Because the generated `.pml` scripts utilize relative paths to locate and load your protein structures, PyMOL must be able to resolve these paths correctly. Moving folders around or launching PyMOL from the wrong directory will cause file-loading errors.
+
+To ensure the automated PyMOL sessions function correctly, observe the following rules:
+
+1. **Maintain Relative Folder Positions:** Do not move your protein input folder or your output directory after running the analysis. The paths written inside the PyMOL scripts depend on the exact spatial relationship between those directories at the time of execution.
+
+2. **Launch PyMOL from the Project Working Directory:** 
+   Do not double-click the `.pml` file directly from your operating system's file manager. Doing so forces PyMOL to set its working directory inside the deeply nested folder (`output_dir/pymol_scripts/[threshold]/`), which breaks the relative links to your protein files.
+
+   Instead, follow this standard workflow:
+   - Open your terminal in the main directory where you originally ran ProTwins (e.g., your home directory `~/`).
+   - Launch PyMOL from that terminal by typing:
+     ```bash
+     pymol
+     ```
+   - Once the PyMOL GUI opens, go to **File** -> **Run Script...**, navigate into your output folder hierarchy, and select the desired `.pml` file.
+
+This workflow guarantees that PyMOL inherits the correct execution context and successfully loads every structure into the alignment.
+
 ## Authors and Citation
 
 Developed as a structural bioinformatics utility for protein analysis. 
